@@ -480,12 +480,12 @@ input[type="text"], input[type="number"], input[type="date"], input[type="month"
   var readyResolve; var ready = new Promise(function (r) { readyResolve = r; });
   window.claude = { use: function (n) { return ready.then(function () { return n === 'db' ? db : n === 'user' ? user : n === 'downloads' ? downloads : null; }); } };
 
-  var css = '#sak-login{position:fixed;inset:0;z-index:9999;display:grid;place-items:center;background:var(--bg,#f6f7f9);font-family:"IBM Plex Sans Arabic",system-ui,sans-serif;padding:20px}' +
-    '#sak-login .box{width:100%;max-width:380px;background:var(--panel,#fff);border:1px solid var(--line,#e3e6ea);border-radius:16px;padding:28px;box-shadow:0 10px 40px rgba(0,0,0,.06)}' +
+  var css = '#sak-login{position:fixed;inset:0;z-index:9999;display:grid;place-items:center;background:var(--bg,#f6f7f9);color:var(--ink,#16181d);font-family:"IBM Plex Sans Arabic",system-ui,sans-serif;padding:20px}' +
+    '#sak-login .box{width:100%;max-width:380px;background:var(--surface,#fff);border:1px solid var(--line,#e3e6ea);border-radius:16px;padding:28px;box-shadow:0 10px 40px rgba(0,0,0,.06)}' +
     '#sak-login h1{margin:0 0 4px;font-size:22px}#sak-login p{margin:0 0 18px;color:var(--muted,#6b7280);font-size:14px}' +
     '#sak-login label{display:block;font-size:13px;margin:12px 0 6px;color:var(--muted,#6b7280)}' +
-    '#sak-login input{width:100%;box-sizing:border-box;padding:11px 12px;border:1px solid var(--line,#d6dae0);border-radius:10px;font:inherit;background:var(--bg,#fff);color:inherit}' +
-    '#sak-login button.go{width:100%;margin-top:18px;padding:12px;border:0;border-radius:10px;background:var(--accent,#1f6f5c);color:#fff;font:inherit;font-weight:600;cursor:pointer}' +
+    '#sak-login input{width:100%;box-sizing:border-box;padding:11px 12px;border:1px solid var(--line,#d6dae0);border-radius:10px;font:inherit;background:var(--sunken,#fff);color:inherit}' +
+    '#sak-login button.go{width:100%;margin-top:18px;padding:12px;border:0;border-radius:10px;background:var(--accent,#1f6f5c);color:var(--accent-ink,#fff);font:inherit;font-weight:600;cursor:pointer}' +
     '#sak-login button.go:disabled{opacity:.6;cursor:default}#sak-login .msg{min-height:20px;margin-top:12px;font-size:13px;color:#b42318}#sak-login .msg.ok{color:#1f6f5c}' +
     '#sak-login .alt{margin-top:14px;text-align:center;font-size:13px}#sak-login .alt a{color:var(--accent,#1f6f5c);cursor:pointer;text-decoration:underline}' +
     '#sak-login .lang{position:absolute;top:16px;inset-inline-end:16px;background:none;border:1px solid var(--line,#d6dae0);border-radius:8px;padding:6px 10px;font:inherit;cursor:pointer;color:inherit}' +
