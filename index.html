@@ -721,7 +721,7 @@ window.SAK_EN = {"،": ",", "و": "and", "لا": "No", "شهر": "mo", "شهر."
       r.rGap = Math.max(0, Math.round((r.rNext !== null ? Math.min(r.rNext, arrive) : arrive) - out));
     }
     function timing(r) {
-      r.tAlert = false; r.tQty = 0; r.tAtArrival = null; r.tStockout = null; r.tArrive = null; r.tShort = 0;
+      r.tAlert = false; r.tQty = 0; r.tQtyMoq = 0; r.tAtArrival = null; r.tStockout = null; r.tArrive = null; r.tShort = 0;
       if (!(r.H > 0) || r.CE > 0) return;
       var perDay = r.H / 30, arrive = D0 + Math.round(r.G * 30), safety = r.H * st.safety;
       var ev = r.inb.filter(function (x) { return x.eta !== null && x.qty > 0; })
@@ -739,7 +739,9 @@ window.SAK_EN = {"،": ",", "و": "and", "لا": "No", "شهر": "mo", "شهر."
       for (; i < ev.length && ev[i].day <= horizon; i++) { check(ev[i].day); lv += ev[i].qty; }
       check(horizon);
       r.tAlert = true; r.tShort = short;
-      r.tQty = short > EPS ? (r.E > 0 ? ceilTo(round(short, 6), r.E) : Math.ceil(short - 1e-9)) : 0;
+      // exact cartons needed (no MOQ rounding: adding to an existing PO is often possible below MOQ); MOQ-rounded kept for reference
+      r.tQty = short > EPS ? Math.ceil(round(short, 6) - 1e-9) : 0;
+      r.tQtyMoq = short > EPS && r.E > 0 ? ceilTo(round(short, 6), r.E) : r.tQty;
     }
     var rows = skus.map(function (s) {
       var r = { sku: s, code: s.code, sup: supplierOf(s) };
@@ -1083,15 +1085,27 @@ window.SAK_EN = {"،": ",", "و": "and", "لا": "No", "شهر": "mo", "شهر."
     });
     return best;
   }
+  function poRoom(po, r) {
+    var LC = D.landed && D.landed[po.id]; if (!LC) return null;
+    var ctr = N(po.containers), free = Math.max(0, ctr - N(LC.totals.share));
+    var is40 = po.containerType === '40ft', c20 = N(r.sku.cap20), c40 = N(r.sku.cap40);
+    var cap = is40 ? (c40 || c20 * 2) : (c20 || c40 / 2);
+    if (!(ctr > 0) || !(cap > 0)) return null;
+    return { ctn: Math.floor(free * cap + 1e-9), fill: N(LC.totals.share) / ctr };
+  }
   function stName(st) { return SHIP_ST[!st || st === 'po' ? 'approved' : st] || st; }
   function timingText(r) {
     if (!r.tAlert) return '';
     var arr = E.dayIso(r.tArrive), qty = f0(r.tQty), po = r.tQty > 0 ? poNear(r) : null;
-    var addTxt = po ? L('لا تنشئ أمراً جديداً: الأمر ' + po.no + ' (' + stName(po.status) + '، يصل ' + po.eta + ') يصل في نفس الوقت تقريباً. أضف إليه نحو ' + qty + ' كرتون.', 'Do not create a new PO: ' + po.no + ' (' + stName(po.status) + ', arriving ' + po.eta + ') lands at about the same time. Add about ' + qty + ' CTN to it.') : null;
+    var room = po ? poRoom(po, r) : null;
+    var roomTxt = !room ? '' : room.ctn >= r.tQty ? L(' في حاويته مكان لنحو ' + f0(room.ctn) + ' كرتون من هذا الصنف (ممتلئة ' + pct(room.fill, 0) + ').', ' Its container has room for about ' + f0(room.ctn) + ' CTN of this item (' + pct(room.fill, 0) + ' full).')
+      : L(' المكان المتبقي في حاويته نحو ' + f0(room.ctn) + ' كرتون فقط (ممتلئة ' + pct(room.fill, 0) + ')، فالباقي يحتاج حاوية إضافية أو تقليل صنف آخر.', ' Its container only has room for about ' + f0(room.ctn) + ' CTN (' + pct(room.fill, 0) + ' full); the rest needs another container or less of another item.');
+    var addTxt = po ? L('لا تنشئ أمراً جديداً: الأمر ' + po.no + ' (' + stName(po.status) + '، يصل ' + po.eta + ') يصل في نفس الوقت تقريباً. أضف إليه ' + qty + ' كرتون.', 'Do not create a new PO: ' + po.no + ' (' + stName(po.status) + ', arriving ' + po.eta + ') lands at about the same time. Add ' + qty + ' CTN to it.') + roomTxt : null;
+    var moqTxt = r.tQtyMoq > r.tQty ? L(' (الحد الأدنى لطلب جديد ' + f0(r.E) + '، أي ' + f0(r.tQtyMoq) + ')', ' (minimum for a new PO is ' + f0(r.E) + ', i.e. ' + f0(r.tQtyMoq) + ')') : '';
     if (r.tStockout !== null) return L('ينفد المخزون نحو ' + E.dayIso(r.tStockout) + '، وأي طلب اليوم يصل نحو ' + arr + '. الوارد البعيد يخفي هذه الحاجة. ', 'Stock runs out around ' + E.dayIso(r.tStockout) + ' and an order placed today arrives around ' + arr + '. Far-off inbound hides this need. ') +
-      (addTxt ? addTxt + L(' واطلب من المورد تقديم شحنه.', ' And ask the supplier to bring it forward.') : r.tQty > 0 ? L('اطلب الآن نحو ' + qty + ' كرتون واستعجل الوارد القريب.', 'Order about ' + qty + ' CTN now and expedite the nearest inbound.') : L('استعجل الوارد القريب.', 'Expedite the nearest inbound.'));
+      (addTxt ? addTxt + L(' واطلب من المورد تقديم شحنه.', ' And ask the supplier to bring it forward.') : r.tQty > 0 ? L('اطلب الآن ' + qty + ' كرتون', 'Order ' + qty + ' CTN now') + moqTxt + L(' واستعجل الوارد القريب.', ' and expedite the nearest inbound.') : L('استعجل الوارد القريب.', 'Expedite the nearest inbound.'));
     return L('عند وصول أي طلب اليوم (نحو ' + arr + ') يبقى ' + f0(Math.max(0, r.tAtArrival)) + ' كرتون فقط، أقل من مخزون الأمان. الوارد البعيد يخفي هذه الحاجة. ', 'When an order placed today arrives (around ' + arr + ') only ' + f0(Math.max(0, r.tAtArrival)) + ' CTN remain, below safety stock. Far-off inbound hides this need. ') +
-      (addTxt ? addTxt : r.tQty > 0 ? L('اطلب الآن نحو ' + qty + ' كرتون.', 'Order about ' + qty + ' CTN now.') : '');
+      (addTxt ? addTxt : r.tQty > 0 ? L('اطلب الآن ' + qty + ' كرتون', 'Order ' + qty + ' CTN now') + moqTxt + '.' : '');
   }
   function timingTag(r) { if (!r.tAlert) return ''; var po = r.tQty > 0 ? poNear(r) : null; return ' <span class="tag ' + (r.tStockout !== null ? 'bad' : 'warn') + '" title="' + esc(timingText(r)) + '">' + (po ? L('أضف ', 'Add ') + f0(r.tQty) + L(' إلى ', ' to ') + esc(po.no) : L('حسب الوصول: ', 'By arrival: ') + f0(r.tQty)) + '</span>'; }
   function riskAr(r) { if (LANG === 'en') return r.CL || ''; return r.CE > 0 ? (r.stockOutDays > 0 ? 'ينفد قبل وصول الطلب بنحو ' + r.stockOutDays + ' يوم' : 'يكفي حتى وصول الطلب') : ''; }
