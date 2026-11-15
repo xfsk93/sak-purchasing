@@ -697,6 +697,29 @@ window.SAK_EN = {"،": ",", "و": "and", "لا": "No", "شهر": "mo", "شهر."
     // For items the plan does not order, project stock day by day to when an order placed today would arrive
     // (today + lead time) and on through the cover target. If stock falls below safety stock in that window,
     // flag it and suggest the quantity that keeps it at safety. Only adds fields (t*); Excel columns are unchanged.
+    // Run-out check (added 2026-11-15): for every item with sales, will stock hit zero before an order placed
+    // today could arrive? If so, ordering cannot prevent it – only expediting, local buying or moving stock can.
+    // rOut = run-out day, rNext = first inbound after that day (null if none), rGap = days without stock until rNext
+    // (or until an order placed today arrives, if no inbound comes first).
+    function runout(r) {
+      r.rOut = null; r.rNext = null; r.rGap = 0;
+      if (!(r.H > 0)) return;
+      var perDay = r.H / 30, arrive = D0 + Math.round(r.G * 30), level = r.F, day = D0, out = null;
+      var ev = r.inb.filter(function (x) { return x.eta !== null && x.qty > 0; })
+        .map(function (x) { return { day: Math.max(x.eta, D0), qty: x.qty }; })
+        .sort(function (a, b) { return a.day - b.day; });
+      if (level <= 0 && !(ev.length && ev[0].day === D0)) out = D0;
+      for (var i = 0; out === null && i < ev.length && ev[i].day <= arrive; i++) {
+        var next = level - perDay * (ev[i].day - day);
+        if (next < 0) { out = day + Math.max(0, level) / perDay; break; }
+        level = next + ev[i].qty; day = ev[i].day;
+      }
+      if (out === null && level - perDay * (arrive - day) < 0) out = day + Math.max(0, level) / perDay;
+      if (out === null || out >= arrive) return;
+      r.rOut = Math.floor(out);
+      for (var k = 0; k < ev.length; k++) if (ev[k].day > out) { r.rNext = ev[k].day; break; }
+      r.rGap = Math.max(0, Math.round((r.rNext !== null ? Math.min(r.rNext, arrive) : arrive) - out));
+    }
     function timing(r) {
       r.tAlert = false; r.tQty = 0; r.tAtArrival = null; r.tStockout = null; r.tArrive = null; r.tShort = 0;
       if (!(r.H > 0) || r.CE > 0) return;
@@ -878,6 +901,7 @@ window.SAK_EN = {"،": ",", "و": "and", "لا": "No", "شهر": "mo", "شهر."
       else if (hasOv && r.CE < r.CD) r.CR = 'YES – override below plan';
       else r.CR = '';
       timing(r);
+      runout(r);
       if (s.stockMissing) r.CT = 'Code not in STOCK ALL – stock 0 used';
       else if (r.CE > 0 && r.AP === 0) r.CT = 'No container capacity – supplier avg used';
       else if (r.CE > 0 && (r.AO === '40ft' || r.AO === 'Both') && r.J === 0) r.CT = 'No 40ft capacity – estimated 2 x 20ft';
@@ -1421,6 +1445,8 @@ window.SAK_EN = {"،": ",", "و": "and", "لا": "No", "شهر": "mo", "شهر."
     if (age > 7) add(1, age, 'يوماً منذ آخر تحديث للمخزون. ارفع ملف المخزون الجديد.', 'days since stock was last updated. Upload the new stock file.', 'data', 'تحديث المخزون', 'Update stock');
     var manual = p.rows.filter(function (r) { return r.sku.avgSrc !== 'auto'; }).length;
     if (manual) add(4, manual, 'صنف متوسط مبيعاته مُدخل يدوياً. ارفع ملف المبيعات ليُحسب تلقائياً.', 'SKUs use a manually typed sales average. Upload the sales file to calculate it automatically.', 'data', 'تحديث المبيعات', 'Update sales');
+    var runout = p.rows.filter(function (r) { return r.rOut !== null; }).length;
+    if (runout) add(1, runout, 'صنف ينفد قبل أن يصل أي طلب تضعه اليوم. الطلب وحده لا يكفي: استعجل الوارد أو اشترِ محلياً أو انقل بين الفروع.', 'SKUs run out before any order placed today can arrive. Ordering alone is not enough: expedite inbound, buy locally or move stock between branches.', 'plan', 'عرض القائمة', 'Show list', ['filter-status', '__runout']);
     var timed = p.rows.filter(function (r) { return r.tAlert; }).length;
     if (timed) add(1, timed, 'صنف ستقل عن مخزون الأمان قبل أن يصل أي طلب جديد، والخطة لا تطلبها لأن الوارد البعيد يُحسب كأنه موجود. راجعها في «كل الأصناف».', 'SKUs will drop below safety stock before any new order can arrive; the plan orders none because far-off inbound is counted as if on hand. Review them under All SKUs.', 'items', 'مراجعة', 'Review');
     var gapped = p.rows.filter(function (r) { return r.sku.avgSrc === 'auto' && r.sku.avgGaps > 0; }).length;
@@ -1474,7 +1500,7 @@ window.SAK_EN = {"،": ",", "و": "and", "لا": "No", "شهر": "mo", "شهر."
   }
 
   VIEW.items = function () {
-    var p = D.plan;
+    var p = D.plan, nOut = p.rows.filter(function (r) { return r.rOut !== null; }).length;
     var sups = p.suppliers.map(function (s) { return s.name; });
     var h = '<div class="head"><div><h1>الأصناف</h1><p>كل الحسابات لكل صنف. اضغط على الصف لعرض التفاصيل وتعديل البيانات.</p></div><div class="actions">' +
       (S.dl ? '<button class="btn" data-act="export-items">تصدير Excel</button>' : '') +
@@ -1482,7 +1508,9 @@ window.SAK_EN = {"،": ",", "و": "and", "لا": "No", "شهر": "mo", "شهر."
     h += '<div class="filters"><div class="field" style="flex:1 1 220px"><input type="search" id="q" data-in="q" placeholder="ابحث بالكود أو الاسم" value="' + esc(S.f.q) + '"></div>' +
       '<div class="field" style="flex:0 1 190px"><select id="fsup" data-in="sup"><option value="*">كل الموردين</option>' + sups.map(function (s) { return '<option' + (S.f.sup === s ? ' selected' : '') + ' value="' + esc(s) + '">' + esc(s || '(بدون مورد)') + '</option>'; }).join('') + '</select></div></div>' +
       '<div class="chips" style="margin-bottom:12px"><button class="chip" data-act="st" data-v="" aria-pressed="' + (S.f.st === '') + '">الكل <span class="num">' + p.rows.length + '</span></button>' +
-      p.summary.map(function (s) { return '<button class="chip st-' + ST[s.status].i + '" data-act="st" data-v="' + esc(s.status) + '" aria-pressed="' + (S.f.st === s.status) + '">' + ST[s.status].ar + ' <span class="num">' + s.skus + '</span></button>'; }).join('') + '</div>';
+      p.summary.map(function (s) { return '<button class="chip st-' + ST[s.status].i + '" data-act="st" data-v="' + esc(s.status) + '" aria-pressed="' + (S.f.st === s.status) + '">' + ST[s.status].ar + ' <span class="num">' + s.skus + '</span></button>'; }).join('') +
+      (nOut ? '<button class="chip st-1" data-act="st" data-v="__runout" aria-pressed="' + (S.f.st === '__runout') + '" title="' + esc(L('أصناف ينفد مخزونها قبل أن يصل أي طلب تضعه اليوم. الطلب وحده لا يمنع الانقطاع: استعجل الوارد أو اشترِ محلياً أو انقل من فرع.', 'Items that run out before any order placed today can arrive. Ordering alone cannot prevent it: expedite inbound, buy locally or move stock between branches.')) + '">' + L('سينفد قبل وصول أي طلب', 'Runs out before any order arrives') + ' <span class="num">' + nOut + '</span></button>' : '') + '</div>' +
+      (S.f.st === '__runout' ? '<p class="note bad" style="margin:0 0 12px">' + L('هذه الأصناف ينفد مخزونها قبل أن يصل أي طلب تضعه اليوم (حسب مدة التوريد)، مرتبة من الأقرب نفاداً. الطلب الآن لا يمنع الانقطاع: استعجل الشحنة القادمة، أو اشترِ كمية محلية، أو انقل من فرع آخر.', 'These items run out before any order placed today can arrive (lead time), soonest first. Ordering now cannot prevent the gap: expedite the next shipment, buy locally, or move stock from another branch.') + '</p>' : '');
     h += '<div class="chips" style="margin-bottom:12px"><button class="chip" data-act="simple" data-v="1" aria-pressed="' + S.simple + '">' + L('عرض مبسّط', 'Simple view') + '</button><button class="chip" data-act="simple" data-v="0" aria-pressed="' + !S.simple + '">' + L('عرض تفصيلي', 'Detailed view') + '</button></div>';
     h += '<div class="card"><div class="scroll" id="items-wrap">' + itemsTable() + '</div></div>';
     return h;
@@ -1490,16 +1518,33 @@ window.SAK_EN = {"،": ",", "و": "and", "لا": "No", "شهر": "mo", "شهر."
   function filteredRows() {
     var q = S.f.q.trim().toLowerCase();
     return D.plan.rows.filter(function (r) {
-      if (S.f.st && r.AG !== S.f.st) return false;
+      if (S.f.st === '__runout') { if (r.rOut === null) return false; }
+      else if (S.f.st && r.AG !== S.f.st) return false;
       if (S.f.sup !== '*' && r.sup !== S.f.sup) return false;
       if (q && String(r.code).toLowerCase().indexOf(q) < 0 && String(r.sku.name || '').toLowerCase().indexOf(q) < 0) return false;
       return true;
-    });
+    }).sort(function (a, b) { return S.f.st === '__runout' ? a.rOut - b.rOut || b.H - a.H : 0; });
+  }
+  function runoutText(r) {
+    if (r.rOut === null) return '';
+    var today = r.rOut <= E.dayNum(S.settings.date);
+    return (today ? L('نافد الآن', 'Out now') : L('ينفد نحو ', 'Runs out around ') + E.dayIso(r.rOut)) + ' · ' +
+      (r.rNext !== null ? L('أقرب وارد ', 'next inbound ') + E.dayIso(r.rNext) : L('لا وارد قبل وصول طلب جديد', 'no inbound before a new order could land')) + ' · ' +
+      L('نحو ' + r.rGap + ' يوم بدون مخزون', 'about ' + r.rGap + ' days without stock');
   }
   function itemsTable() {
     var rows = filteredRows();
     if (!D.plan.rows.length) return emptyStart();
     if (!rows.length) return '<div class="empty">لا توجد أصناف مطابقة للبحث.</div>';
+    if (S.f.st === '__runout') {
+      var d0 = E.dayNum(S.settings.date);
+      return '<table><thead><tr><th>' + L('الكود', 'Code') + '</th><th>' + L('الصنف', 'Item') + '</th><th>' + L('المورد', 'Supplier') + '</th><th class="n">' + L('المخزون', 'Stock') + '</th><th class="n">' + L('مبيعات/شهر', 'Sales / mo') + '</th><th>' + L('ينفد', 'Runs out') + '</th><th>' + L('أقرب وارد', 'Next inbound') + '</th><th class="n">' + L('أيام بدون مخزون', 'Days without stock') + '</th><th class="n">' + L('اطلب الآن', 'Order now') + '</th></tr></thead><tbody>' +
+        rows.map(function (r) {
+          return '<tr class="click" data-act="open-sku" data-v="' + esc(r.code) + '"><td class="stripe st-' + ST[r.AG].i + ' num">' + esc(r.code) + '</td><td><div class="item-name" title="' + esc(r.sku.name) + '">' + esc(r.sku.name) + '</div></td><td>' + esc(r.sup) + '</td><td class="n">' + f0(r.F) + '</td><td class="n">' + f0(r.H) + '</td>' +
+            '<td class="num"><b>' + (r.rOut <= d0 ? L('نافد الآن', 'Out now') : E.dayIso(r.rOut)) + '</b></td><td class="num">' + (r.rNext !== null ? E.dayIso(r.rNext) : '<span class="muted">' + L('لا يوجد', 'none') + '</span>') + '</td>' +
+            '<td class="n"><span class="tag ' + (r.rGap >= 30 ? 'bad' : 'warn') + '">' + r.rGap + '</span></td><td class="n">' + (r.CE > 0 ? '<b style="color:var(--accent)">' + f0(r.CE) + '</b>' : '—') + '</td></tr>';
+        }).join('') + '</tbody></table>';
+    }
     if (S.simple) return '<table><thead><tr><th>' + L('الكود', 'Code') + '</th><th>' + L('الصنف', 'Item') + '</th><th>' + L('المورد', 'Supplier') + '</th><th>' + L('الحالة', 'Status') + '</th><th class="n">' + L('المخزون', 'Stock') + '</th><th class="n">' + L('مبيعات/شهر', 'Sales / mo') + '</th><th class="n">' + L('يكفي (شهر)', 'Covers (mo)') + '</th><th class="n">' + L('الوارد', 'Inbound') + '</th><th class="n">' + L('اطلب الآن', 'Order now') + '</th><th class="wrap">' + L('المطلوب', 'What to do') + '</th></tr></thead><tbody>' +
       rows.map(function (r) {
         return '<tr class="click" data-act="open-sku" data-v="' + esc(r.code) + '"><td class="stripe st-' + ST[r.AG].i + ' num">' + esc(r.code) + '</td><td><div class="item-name" title="' + esc(r.sku.name) + '">' + esc(r.sku.name) + '</div></td><td>' + esc(r.sup) + '</td><td>' + pill(r.AG) + '</td><td class="n">' + f0(r.F) + '</td><td class="n">' + f0(r.H) + (r.sku.avgSrc === 'auto' ? ' <span class="tag good">' + L('تلقائي', 'auto') + '</span>' : '') + '</td><td class="n">' + f1(r.T) + '</td><td class="n">' + f0(r.Y) + '</td><td class="n">' + (r.CE > 0 ? '<b style="color:var(--accent)">' + f0(r.CE) + '</b>' : '—') + timingTag(r) + '</td><td class="wrap">' + ST[r.AG].act + '</td></tr>';
@@ -2053,6 +2098,7 @@ window.SAK_EN = {"،": ",", "و": "and", "لا": "No", "شهر": "mo", "شهر."
         ['وصول الطلب', dt(r.CI)], ['المخزون عند الوصول', r.CJ === null ? '—' : f0(r.CJ)], ['التغطية عند الوصول', r.CK === null ? '—' : f2(r.CK)], ['موعد الطلب القادم', dt(r.CP)],
         ['كمية الطلب القادم', r.CQ === null ? '—' : f0(r.CQ)]]) +
         (r.CL ? '<p class="note ' + (r.stockOutDays ? 'bad' : '') + '" style="margin:12px 0 0">' + esc(riskAr(r)) + '</p>' : '') +
+        (r.rOut !== null ? '<p class="note bad" style="margin:12px 0 0"><b>' + L('ينفد قبل وصول أي طلب: ', 'Runs out before any order arrives: ') + '</b>' + esc(runoutText(r)) + '</p>' : '') +
         (r.tAlert ? '<p class="note ' + (r.tStockout !== null ? 'bad' : 'warn') + '" style="margin:12px 0 0"><b>' + L('تنبيه حسب تاريخ الوصول: ', 'Arrival-date check: ') + '</b>' + esc(timingText(r)) + '</p>' : '') +
         (r.CR ? '<p class="note warn" style="margin:8px 0 0">موافقة الإدارة: ' + esc(approvalAr(r)) + '</p>' : '') +
         (r.CT ? '<p class="note warn" style="margin:8px 0 0">' + esc(tr(r.CT)) + '</p>' : '') + '</div></div>';
