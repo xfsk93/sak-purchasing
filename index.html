@@ -359,6 +359,12 @@ input[type="text"], input[type="number"], input[type="date"], input[type="month"
 .steps li.can { cursor: pointer; outline: 1px dashed color-mix(in srgb, var(--accent) 45%, transparent); outline-offset: -2px; }
 .steps li.can:hover, .steps li.can:focus-visible { background: var(--accent-soft); color: var(--accent); }
 
+/* monthly sales page */
+.sg input.sgi { width: 78px; padding: 6px 8px; text-align: end; }
+.sg input.sgi.changed { outline: 2px solid var(--accent); outline-offset: -1px; }
+.sg th.inwin { color: var(--accent); }
+.sg td small.tag { display: block; margin-top: 3px; font-size: 10.5px; padding: 1px 6px; width: max-content; margin-inline-start: auto; }
+
 </style>
 </head>
 <body>
@@ -1028,7 +1034,35 @@ window.SAK_EN = {"،": ",", "و": "and", "لا": "No", "شهر": "mo", "شهر."
     return { lines: lines, costs: costs, totals: T, noCap: noCap };
   }
 
-  var api = { computePlan: computePlan, computeLanded: computeLanded, dayNum: dayNum, dayIso: dayIso,
+  /* Stock-out correction (added 2026-11-15). Daftra gives current stock only, so out-of-stock days are inferred
+     from the daily sales: a run of days without any sale that is unusually long for the item.
+     findOutDays: saleDays = sorted 'YYYY-MM-DD' days with a sale; from/to = file range; months = complete months.
+       Only items selling on >= 3 days a month are judged. A gap counts if it is >= max(14, 3 x the item's usual gap).
+       Returns {month: days without stock} for months with >= 5 such days.
+     adjustMonth: > 20 days out → the month is left out; 5–20 days → sales scaled to a full month (at most x2). */
+  function findOutDays(saleDays, from, to, months) {
+    var out = {}; if (!months.length || !from || !to) return out;
+    var inside = function (d) { return months.indexOf(d.slice(0, 7)) >= 0; };
+    var sold = saleDays.filter(inside).length, perMonth = sold / months.length;
+    if (perMonth < 3) return out;
+    var T = Math.max(14, Math.round(90 / perMonth)), D0 = dayNum(from), D1 = dayNum(to), prev = D0 - 1, gaps = [];
+    saleDays.map(dayNum).filter(function (d) { return d >= D0 && d <= D1; }).concat([D1 + 1]).forEach(function (d) {
+      if (d - prev - 1 >= T) gaps.push([prev + 1, d - 1]); prev = Math.max(prev, d);
+    });
+    months.forEach(function (m) {
+      var a = dayNum(m + '-01'), b = a + new Date(Date.UTC(+m.slice(0, 4), +m.slice(5, 7), 0)).getUTCDate() - 1;
+      var o = 0; gaps.forEach(function (g) { o += Math.max(0, Math.min(b, g[1]) - Math.max(a, g[0]) + 1); });
+      if (o >= 5) out[m] = o;
+    });
+    return out;
+  }
+  function adjustMonth(value, month, off) {
+    var y = +month.slice(0, 4), mo = +month.slice(5, 7), n = new Date(Date.UTC(y, mo, 0)).getUTCDate();
+    if (!(off >= 5)) return { use: true, value: value, factor: 1 };
+    if (off > 20) return { use: false, value: null, factor: null };
+    var f = Math.min(2, n / (n - off)); return { use: true, value: value * f, factor: f };
+  }
+  var api = { computePlan: computePlan, findOutDays: findOutDays, adjustMonth: adjustMonth, computeLanded: computeLanded, dayNum: dayNum, dayIso: dayIso,
     supplierOf: supplierOf, STATUSES: STATUSES, N: N };
   if (typeof module !== 'undefined' && module.exports) module.exports = api; else root.SAK = api;
 })(typeof window !== 'undefined' ? window : this);
@@ -1209,14 +1243,56 @@ window.SAK_EN = {"،": ",", "و": "and", "لا": "No", "شهر": "mo", "شهر."
     if (!win.length || !win.some(function (m) { return sales[m] !== undefined; })) return null;
     // a month counts as zero only if a sales report covering it was uploaded; otherwise it is unknown and left out
     var covered = salesMonths(), t = 0, w = 0, gaps = 0;
+    var od = k.outDays || {}, adj = 0, dropped = 0;
     win.forEach(function (m, i) {
       var known = sales[m] !== undefined || covered[m];
       if (!known) { gaps++; return; }
-      var wt = S.settings.avgMethod === 'weighted' ? i + 1 : 1; t += N(sales[m]) * wt; w += wt;
+      var a = E.adjustMonth(N(sales[m]), m, N(od[m]));
+      if (!a.use) { dropped++; return; }
+      if (a.factor > 1) adj++;
+      var wt = S.settings.avgMethod === 'weighted' ? i + 1 : 1; t += a.value * wt; w += wt;
     });
-    k._avgGaps = gaps;
+    k._avgGaps = gaps; k._avgAdj = adj; k._avgDropped = dropped;
     return w ? t / w : null;
   }
+  function outDaysNote(d) {
+    var od = d.outDays || {}, ms = Object.keys(od).filter(function (m) { return od[m] >= 5; }).sort(); if (!ms.length) return '';
+    return '<p class="note warn" style="margin:10px 0 0"><b>' + L('أشهر يبدو أن الصنف كان نافداً فيها: ', 'Months the item seems to have been out of stock: ') + '</b>' + ms.map(function (m) {
+      var a = E.adjustMonth(N((d.sales || {})[m]), m, od[m]);
+      return '<span class="num">' + m + '</span> (' + L('نحو ' + od[m] + ' يوم', 'about ' + od[m] + ' days') + ' – ' + (a.use ? L('صُحّحت ', 'corrected ') + f0(N((d.sales || {})[m])) + ' → ' + f0(a.value) : L('استُبعد من المتوسط', 'left out of the average')) + ')';
+    }).join('، ') + '</p>';
+  }
+  /* Monthly sales page (Setup → Monthly sales): see and edit every item's monthly sales and its average in one table. */
+  function sgState() { return S.sg || (S.sg = { q: '', sup: '*', edits: {} }); }
+  function sgCount() { return Object.keys(sgState().edits).length; }
+  function salesGridView() {
+    var sg = sgState(), ro = S.canWrite ? '' : ' disabled', n = sgCount();
+    var h = '<div class="head"><div><h1>' + L('المبيعات الشهرية', 'Monthly sales') + '</h1><p>' + L('مبيعات كل صنف بالكرتون لآخر 6 أشهر قبل تاريخ المخزون. عدّل أي شهر، أو اختر متوسطاً يدوياً للصنف. الخانة الفارغة تعني شهراً غير معروف. لا يُحفظ شيء حتى تضغط «حفظ التغييرات».', 'Each item\'s sales in cartons for the 6 months before the stock date. Edit any month, or set a manual average for the item. An empty cell means the month is unknown. Nothing is saved until you press Save changes.') + '</p></div>' +
+      (S.canWrite ? '<div class="actions"><button class="btn" data-act="sg-discard"' + (n ? '' : ' disabled') + '>' + L('تراجع', 'Discard') + '</button><button class="btn primary" id="sg-save" data-act="sg-save"' + (n ? '' : ' disabled') + '>' + L('حفظ التغييرات', 'Save changes') + (n ? ' (' + n + ')' : '') + '</button></div>' : '') + '</div>';
+    var sups = D.plan.suppliers.map(function (x) { return x.name; });
+    h += '<div class="filters"><div class="field" style="flex:1 1 220px"><input type="search" data-sgf="q" placeholder="' + L('ابحث بالكود أو الاسم', 'Search by code or name') + '" value="' + esc(sg.q) + '"></div><div class="field" style="flex:0 1 190px"><select data-sgf="sup"><option value="*">' + L('كل الموردين', 'All suppliers') + '</option>' + sups.map(function (x) { return '<option' + (sg.sup === x ? ' selected' : '') + ' value="' + esc(x) + '">' + esc(x || L('(بدون مورد)', '(no supplier)')) + '</option>'; }).join('') + '</select></div></div>';
+    h += '<div class="card"><div class="scroll" id="sg-wrap">' + sgTable(ro) + '</div></div>';
+    h += '<p class="muted small">' + L('علامة «نفاد» تحت الشهر: النظام استنتج من ملف المبيعات أن الصنف كان نافداً تلك الأيام، فصحّح مبيعات الشهر في المتوسط. «تلقائي» يحسب المتوسط من المبيعات حسب القواعد، و«يدوي» يستخدم الرقم الذي تكتبه.', 'An "out" tag under a month: the system inferred from the sales file that the item was out of stock those days and corrected that month in the average. "Auto" averages the sales per the rules; "Manual" uses the number you type.') + '</p>';
+    return h;
+  }
+  function sgTable(ro) {
+    var covered = salesMonths(), sg = sgState(), q = sg.q.trim().toLowerCase(), ms = monthsBack(S.settings.date, 6), win = monthsBack(S.settings.date, Math.max(1, Math.round(N(S.settings.avgMonths)) || 3));
+    var rows = D.plan.rows.filter(function (r) { return (sg.sup === '*' || r.sup === sg.sup) && (!q || String(r.code).toLowerCase().indexOf(q) >= 0 || String(r.sku.name || '').toLowerCase().indexOf(q) >= 0); });
+    return '<table class="sg"><thead><tr><th>' + L('الكود', 'Code') + '</th><th>' + L('الصنف', 'Item') + '</th><th>' + L('المورد', 'Supplier') + '</th>' + ms.map(function (m) { return '<th class="n num' + (win.indexOf(m) >= 0 ? ' inwin' : '') + '" title="' + (win.indexOf(m) >= 0 ? esc(L('داخل فترة المتوسط', 'Inside the averaging window')) : '') + '">' + m + '</th>'; }).join('') +
+      '<th class="n">' + L('المتوسط المستخدم', 'Average used') + '</th><th>' + L('الطريقة', 'Method') + '</th><th class="n">' + L('اليدوي', 'Manual') + '</th></tr></thead><tbody>' +
+      rows.map(function (r) {
+        var k = S.skus.filter(function (x) { return x.code === r.code; })[0] || {}, e = sg.edits[r.code] || {}, es = e.sales || {}, od = k.outDays || {}, sales = k.sales || {};
+        var mode = e.avgMode !== undefined ? e.avgMode : (k.avgMode === 'manual' ? 'manual' : 'auto'), man = e.avg !== undefined ? e.avg : k.avg;
+        return '<tr data-sgrow="' + esc(r.code) + '"><td class="num">' + esc(r.code) + '</td><td><div class="item-name" title="' + esc(r.sku.name) + '">' + esc(r.sku.name) + '</div></td><td>' + esc(r.sup) + '</td>' +
+          ms.map(function (m) {
+            var v = es[m] !== undefined ? es[m] : sales[m], ch = es[m] !== undefined, zero = v === undefined && covered[m];
+            return '<td class="n"><input type="number" min="0" step="any" class="sgi' + (ch ? ' changed' : '') + '" data-sg="' + esc(r.code) + '" data-sgm="' + m + '" value="' + (v === undefined || v === null ? '' : esc(ch ? v : Math.round(N(v) * 10) / 10)) + '"' + (zero ? ' placeholder="0" title="' + esc(L('رُفع تقرير هذا الشهر ولم يُبع الصنف فيه', 'This month was uploaded and the item had no sales')) + '"' : '') + ro + '>' + (N(od[m]) >= 5 ? '<small class="tag warn" title="' + esc(L('نافد نحو ' + od[m] + ' يوم', 'out about ' + od[m] + ' days')) + '">' + L('نفاد ', 'out ') + od[m] + L('ي', 'd') + '</small>' : '') + '</td>';
+          }).join('') +
+          '<td class="n"><b>' + f0(r.H) + '</b></td><td><select data-sg="' + esc(r.code) + '" data-sgm="mode"' + ro + '><option value="auto"' + (mode === 'auto' ? ' selected' : '') + '>' + L('تلقائي', 'Auto') + '</option><option value="manual"' + (mode === 'manual' ? ' selected' : '') + '>' + L('يدوي', 'Manual') + '</option></select></td>' +
+          '<td class="n"><input type="number" min="0" step="any" class="sgi' + (e.avg !== undefined ? ' changed' : '') + '" data-sg="' + esc(r.code) + '" data-sgm="avg" value="' + (man === undefined || man === null ? '' : esc(man)) + '"' + ro + '></td></tr>';
+      }).join('') + '</tbody></table>';
+  }
+  function sgRefreshSave() { var n = sgCount(), b = $('#sg-save'); if (b) { b.disabled = !n; b.textContent = L('حفظ التغييرات', 'Save changes') + (n ? ' (' + n + ')' : ''); } var d = $('[data-act="sg-discard"]'); if (d) d.disabled = !n; }
   function branchSalesTable(d, sm) {
     var sb = d.salesBr; if (!sb) return '';
     var ok = {}; (S.settings.salesMonthsBr || []).forEach(function (m) { ok[m] = 1; });
@@ -1697,7 +1773,7 @@ window.SAK_EN = {"،": ",", "و": "and", "لا": "No", "شهر": "mo", "شهر."
     return tabs('ordTab', [['board', 'لوحة المراحل', 'Stage board'], ['timeline', 'مواعيد الوصول', 'Arrival timeline'], ['list', 'القائمة والتكلفة', 'List & cost']]) + (S.ordTab === 'timeline' ? VIEW.tracking() : S.ordTab === 'list' ? VIEW.shipments() : VIEW.board());
   };
   VIEW.plan = function () { return tabs('planTab', [['suppliers', 'حسب المورد', 'By supplier'], ['items', 'كل الأصناف', 'All items']]) + (S.planTab === 'items' ? VIEW.items() : VIEW.containers()); };
-  VIEW.setup = function () { return tabs('setTab', [['data', 'تحديث البيانات', 'Update data'], ['rules', 'القواعد', 'Rules'], ['users', 'المستخدمون', 'Users'], ['look', 'المظهر', 'Appearance']]) + (S.setTab === 'rules' ? VIEW.rules() : S.setTab === 'users' ? VIEW.users() : S.setTab === 'look' ? VIEW.look() : VIEW.data()); };
+  VIEW.setup = function () { return tabs('setTab', [['data', 'تحديث البيانات', 'Update data'], ['sales', 'المبيعات الشهرية', 'Monthly sales'], ['rules', 'القواعد', 'Rules'], ['users', 'المستخدمون', 'Users'], ['look', 'المظهر', 'Appearance']]) + (S.setTab === 'sales' ? salesGridView() : S.setTab === 'rules' ? VIEW.rules() : S.setTab === 'users' ? VIEW.users() : S.setTab === 'look' ? VIEW.look() : VIEW.data()); };
   VIEW.home = function () { return VIEW.overview(); };
   VIEW.suppliers = function () {
     var names = supNames();
@@ -2091,7 +2167,10 @@ window.SAK_EN = {"،": ",", "و": "and", "لا": "No", "شهر": "mo", "شهر."
       if (r.br && !unsplit[mon]) { var b = (br[r.code] = br[r.code] || {}); b[r.br] = b[r.br] || {}; b[r.br][mon] = (b[r.br][mon] || 0) + q; }
       var t = months[mon] = months[mon] || { skus: {}, ctn: 0, ruh: 0, jed: 0, dam: 0, split: !unsplit[mon] }; t.skus[r.code] = 1; t.ctn += q; if (r.br && !unsplit[mon]) t[r.br] += q;
     });
-    return { agg: agg, br: br, months: months, unknown: Object.keys(unknown), skipped: Object.keys(skipped).sort(), first: first, last: last };
+    var sold = {}, outDays = {}, full = Object.keys(months).filter(function (mo) { return m.hasDate && complete(mo); }).sort();
+    if (m.hasDate) m.recs.forEach(function (r) { if (r.day && r.qty > 0 && D.skuBy[r.code]) (sold[r.code] = sold[r.code] || {})[r.day] = 1; });
+    Object.keys(sold).forEach(function (c) { var o = E.findOutDays(Object.keys(sold[c]).sort(), first, last, full); if (Object.keys(o).length) outDays[c] = o; });
+    return { agg: agg, br: br, months: months, unknown: Object.keys(unknown), skipped: Object.keys(skipped).sort(), first: first, last: last, outDays: outDays, full: full };
   }
   function salesPreview() {
     var m = S.simp; if (!m) return '';
@@ -2100,6 +2179,8 @@ window.SAK_EN = {"،": ",", "و": "and", "لا": "No", "شهر": "mo", "شهر."
     var a = salesAgg(), ms = Object.keys(a.months).sort(), n = Object.keys(a.agg).length;
     var h = '<div class="note" style="margin-top:12px">' + L('قُرئ ', 'Read ') + '<b class="num">' + m.recs.length + '</b>' + L(' سطر مبيعات من «', ' sales lines from “') + esc(m.name) + L('». أصناف مطابقة: ', '”. Matched SKUs: ') + '<b class="num">' + n + '</b>' + (a.unknown.length ? L(' · أكواد غير معروفة: ', ' · unknown codes: ') + '<span class="num">' + a.unknown.length + '</span>' : '') + '</div>';
     if (a.skipped.length) h += '<div class="note warn" style="margin-top:8px">' + L('تُجوهلت أشهر غير مكتملة في الملف (الملف من ', 'Incomplete months were left out (the file runs from ') + '<span class="num">' + esc(a.first) + '</span>' + L(' إلى ', ' to ') + '<span class="num">' + esc(a.last) + '</span>): <b class="num">' + a.skipped.join('، ') + '</b>. ' + L('ارفعها لاحقاً في ملف يغطي الشهر كاملاً.', 'Upload them later in a file that covers the whole month.') + '</div>';
+    var nOut = Object.keys(a.outDays).length;
+    if (nOut) h += '<div class="note warn" style="margin-top:8px">' + L('يبدو أن ', 'It looks like ') + '<b class="num">' + nOut + '</b>' + L(' صنفاً كان نافداً جزءاً من شهر أو أكثر (توقف بيعها مدة أطول بكثير من المعتاد لها). تُصحَّح مبيعات تلك الأشهر: 5–20 يوماً نفاد تُكمَّل لشهر كامل (حتى الضعف)، وأكثر من 20 يوماً يُستبعد الشهر من المتوسط.', ' items were out of stock for part of a month or more (no sales for much longer than usual). Those months are corrected: 5–20 days out are scaled to a full month (at most x2); more than 20 days and the month is left out of the average.') + '</div>';
     if (m.hasBr) h += '<div class="note" style="margin-top:8px">' + L('الفروع من رقم الفاتورة: R الرياض، J جدة، D الدمام (والمرتجعات RR وRJ وRD). الأشهر التي فيها فواتير بلا حرف فرع تُحسب في الإجمالي فقط.', 'Branches from the invoice number: R Riyadh, J Jeddah, D Dammam (returns RR, RJ, RD). Months with invoices without a branch letter count in the total only.') + '</div>';
     h += '<div class="grid wide"><label class="field"><span>' + L('الكمية في الملف بوحدة', 'Quantity in the file is in') + '</span><select id="sim-unit" data-sim="unit">' + (m.hasCtn ? '<option value="file"' + (m.unit === 'file' ? ' selected' : '') + '>' + L('عمود الكرتون في الملف (مُوصى به)', 'The file\'s CTN column (recommended)') + '</option>' : '') + '<option value="pcs"' + (m.unit === 'pcs' ? ' selected' : '') + '>' + L('حبات (تُقسم على مقسوم المخزون أو عدد الحبات)', 'Pieces (divided by stock divisor or pieces per CTN)') + '</option><option value="ctn"' + (m.unit === 'ctn' ? ' selected' : '') + '>' + L('كراتين', 'Cartons') + '</option></select></label>' +
       (m.hasDate ? '' : '<label class="field"><span>' + L('الملف بدون تاريخ. أي شهر يغطيه؟', 'The file has no dates. Which month does it cover?') + '</span><input type="month" id="sim-month" data-sim="month" value="' + esc(m.month) + '"></label>') + '</div>';
@@ -2166,7 +2247,7 @@ window.SAK_EN = {"،": ",", "و": "and", "لا": "No", "شهر": "mo", "شهر."
     h += '<div class="card"><header><h2>' + L('المبيعات الشهرية ومتوسطها', 'Monthly sales and average') + '</h2><span class="muted small">' + (au === null ? L('لا توجد مبيعات مسجّلة، يُستخدم المتوسط اليدوي', 'No sales on record, manual average in use') : L('المتوسط التلقائي: ', 'Automatic average: ') + '<b class="num">' + f1(au) + '</b>') + '</span></header><div class="body"><div class="grid">' +
       sm.map(function (mo) { var v = d.sales[mo]; return '<label class="field"><span class="num">' + mo + '</span><input type="number" id="ks-' + mo + '" data-ks="' + mo + '" min="0" step="any" value="' + esc(v === undefined || v === null ? '' : v) + '"' + ro + '></label>'; }).join('') +
       '<label class="field"><span>' + L('المتوسط المستخدم في الخطة', 'Average used in the plan') + '</span><select id="k-avgMode" data-k="avgMode"' + ro + '><option value="auto"' + (d.avgMode !== 'manual' ? ' selected' : '') + '>' + L('تلقائي من المبيعات', 'Automatic from sales') + '</option><option value="manual"' + (d.avgMode === 'manual' ? ' selected' : '') + '>' + L('يدوي', 'Manual') + '</option></select></label>' +
-      '</div>' + branchSalesTable(d, sm) + '<p class="muted small" style="margin:10px 0 0">' + L('الكميات بالكرتون لكل شهر. تُملأ تلقائياً من ملف المبيعات ويمكن تعديلها هنا.', 'Quantities in CTN per month. Filled automatically from the sales file and editable here.') + '</p></div></div>';
+      '</div>' + outDaysNote(d) + branchSalesTable(d, sm) + '<p class="muted small" style="margin:10px 0 0">' + L('الكميات بالكرتون لكل شهر. تُملأ تلقائياً من ملف المبيعات ويمكن تعديلها هنا.', 'Quantities in CTN per month. Filled automatically from the sales file and editable here.') + '</p></div></div>';
     h += '<div class="card"><header><h2>بيانات الصنف</h2></header><div class="body"><div class="grid">' +
       (S.drawer.isNew ? inp('code', 'الكود', 'text') : '') + inp('brand', 'العلامة / المورد', 'text') + inp('group', 'مجموعة الحاوية (اختياري)', 'text') + inp('packing', 'التعبئة', 'text') +
       '</div><div class="field" style="margin:10px 0"><span>اسم الصنف</span><input type="text" id="k-name" data-k="name" class="ltr" value="' + esc(d.name || '') + '"' + ro + '></div><div class="grid">' +
@@ -2242,6 +2323,21 @@ window.SAK_EN = {"،": ",", "و": "and", "لا": "No", "شهر": "mo", "شهر."
     'new-sku': function () { openSku(null); },
     'close-drawer': function () { S.drawer = null; S.supDrawer = null; renderDrawer(); },
     'close-drawer-bg': function (el, ev) { if (ev.target === el) { S.drawer = null; S.supDrawer = null; renderDrawer(); } },
+    'sg-discard': function () { sgState().edits = {}; render(); },
+    'sg-save': function () {
+      var sg = sgState(), codes = Object.keys(sg.edits), i = 0; if (!codes.length || S.busy) return;
+      S.busy = true; var b = $('#sg-save'); if (b) { b.disabled = true; b.textContent = L('جارٍ الحفظ…', 'Saving…'); }
+      function next() {
+        if (i >= codes.length) return Promise.resolve();
+        var c = codes[i++], e = sg.edits[c], k = S.skus.filter(function (x) { return x.code === c; })[0] || {}, body = {};
+        if (e.sales) { body.sales = Object.assign({}, k.sales || {}); Object.keys(e.sales).forEach(function (m) { if (e.sales[m] === null) delete body.sales[m]; else body.sales[m] = e.sales[m]; }); }
+        if (e.avgMode !== undefined) body.avgMode = e.avgMode;
+        if (e.avg !== undefined) body.avg = e.avg;
+        return write(function () { return S.db.doc('skus/' + c).update(body); }).then(function () { return sleep(30); }).then(next);
+      }
+      next().then(function () { S.busy = false; sg.edits = {}; toast(L('حُفظت مبيعات ' + codes.length + ' صنف وأُعيد حساب الخطة', 'Sales saved for ' + codes.length + ' SKUs and the plan recalculated')); render(); })
+        .catch(function (e) { S.busy = false; fail(e); render(); });
+    },
     'save-sku': function () {
       var d = S.drawer.d, code = String(d.code || '').trim();
       if (!/^[A-Za-z0-9_.\-]+$/.test(code)) return toast('اكتب كود الصنف بأرقام أو حروف إنجليزية بدون مسافات.');
@@ -2406,6 +2502,12 @@ window.SAK_EN = {"،": ",", "و": "and", "لا": "No", "شهر": "mo", "شهر."
     if (ds.in === 'sup') { S.f.sup = val; var w2 = $('#items-wrap'); if (w2) { w2.innerHTML = itemsTable(); localize(w2); } return; }
     if (ds.ks && S.drawer) { var sv = numOrNull(val); if (sv === null) delete S.drawer.d.sales[ds.ks]; else S.drawer.d.sales[ds.ks] = sv; return; }
     if (ds.sim && S.simp) { S.simp[ds.sim] = val; render(); return; }
+    if (ds.sgf) { sgState()[ds.sgf] = val; var sw = $('#sg-wrap'); if (sw) { sw.innerHTML = sgTable(S.canWrite ? '' : ' disabled'); localize(sw); } return; }
+    if (ds.sg) {
+      var sgs = sgState(), ed = sgs.edits[ds.sg] = sgs.edits[ds.sg] || {};
+      if (ds.sgm === 'mode') ed.avgMode = val; else if (ds.sgm === 'avg') ed.avg = numOrNull(val); else { ed.sales = ed.sales || {}; ed.sales[ds.sgm] = numOrNull(val); }
+      el.classList.add('changed'); sgRefreshSave(); return;
+    }
     if (ds.k && S.drawer) { S.drawer.d[ds.k] = val; return; }
     if (el.id === 'gsearch') { search(val); return; }
     if (ds.role && S.isOwner) {
@@ -2554,6 +2656,7 @@ window.SAK_EN = {"،": ",", "و": "and", "لا": "No", "شهر": "mo", "شهر."
       if (i >= codes.length) return Promise.resolve();
       var c = codes[i++], k = D.skuBy[c] || {}, body = { sales: Object.assign({}, k.sales || {}) };
       Object.keys(a.agg[c]).forEach(function (mo) { body.sales[mo] = Math.round(a.agg[c][mo] * 100) / 100; });
+      if (a.full.length) { body.outDays = Object.assign({}, k.outDays || {}); a.full.forEach(function (mo) { delete body.outDays[mo]; }); Object.assign(body.outDays, a.outDays[c] || {}); }
       if (a.br[c]) { body.salesBr = clone(k.salesBr || {}); Object.keys(a.br[c]).forEach(function (b) { body.salesBr[b] = body.salesBr[b] || {}; Object.keys(a.br[c][b]).forEach(function (mo) { body.salesBr[b][mo] = Math.round(a.br[c][b][mo] * 100) / 100; }); }); }
       return write(function () { return S.db.doc('skus/' + c).update(body); }).then(function () { m.done = i; if (i % 10 === 0) render(); return sleep(40); }).then(next);
     }
