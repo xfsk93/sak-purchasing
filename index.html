@@ -355,6 +355,10 @@ input[type="text"], input[type="number"], input[type="date"], input[type="month"
 /* single-column layouts never grow wider than the page */
 .split > *, .home2 > * { min-width: 0; }
 
+/* stages you can click to move a PO, with a confirmation */
+.steps li.can { cursor: pointer; outline: 1px dashed color-mix(in srgb, var(--accent) 45%, transparent); outline-offset: -2px; }
+.steps li.can:hover, .steps li.can:focus-visible { background: var(--accent-soft); color: var(--accent); }
+
 </style>
 </head>
 <body>
@@ -1721,7 +1725,7 @@ window.SAK_EN = {"،": ",", "و": "and", "لا": "No", "شهر": "mo", "شهر."
   }
   function openPo(id, tab) {
     var x = S.shipments.filter(function (k) { return k.id === id; })[0]; if (!x) return;
-    S.editor = Object.assign(blankShip(''), clone(x)); S.editor.status = stOf(x); if (!x.orderDate) S.editor.orderDate = '';
+    S.confirmMove = null; S.editor = Object.assign(blankShip(''), clone(x)); S.editor.status = stOf(x); if (!x.orderDate) S.editor.orderDate = '';
     if (!S.editor.costs) S.editor.costs = []; if (!S.editor.payments) S.editor.payments = [];
     S.poTab = tab || 'items';
     if (S.view !== 'orders') location.hash = '#orders'; else render();
@@ -1734,7 +1738,11 @@ window.SAK_EN = {"،": ",", "و": "and", "لا": "No", "شهر": "mo", "شهر."
       (S.dl && d.lines.length ? '<button class="btn" data-act="po-doc">' + L('تنزيل مستند الأمر', 'Download PO document') + '</button><button class="btn" data-act="export-ship">Excel</button>' : '') +
       (S.isAdmin && d.id ? '<button class="btn danger" data-act="del-ship" id="del-ship">' + L('حذف', 'Delete') + '</button>' : '') +
       (S.canWrite ? '<button class="btn primary" data-act="save-ship">' + L('حفظ', 'Save') + '</button>' : '') + '</div></div>';
-    h += '<ol class="steps">' + STAGES.map(function (k, i) { return '<li class="' + (i < si ? 'done' : i === si ? 'now' : '') + '">' + SHIP_ST[k] + '</li>'; }).join('') + '</ol>';
+    var MOV = ['approved', 'production', 'transit', 'port', 'customs'], canJump = S.canWrite && d.id && MOV.indexOf(st) >= 0;
+    h += '<ol class="steps">' + STAGES.map(function (k, i) {
+      var j = canJump && k !== st && MOV.indexOf(k) >= 0;
+      return '<li class="' + (i < si ? 'done' : i === si ? 'now' : '') + (j ? ' can' : '') + '"' + (j ? ' data-act="po-go" data-v="' + k + '" role="button" tabindex="0" title="' + esc(L('نقل الأمر إلى هذه المرحلة', 'Move the PO to this stage')) + '"' : '') + '>' + SHIP_ST[k] + '</li>';
+    }).join('') + '</ol>';
     var act = '';
     if (S.canWrite) {
       if (st === 'draft') act = S.settings.requireApproval === 'No' ? '<span>' + L('المسودة لا تدخل في وارد الخطة حتى تُؤكَّد.', 'A draft does not count as inbound until confirmed.') + '</span><button class="btn primary" data-act="po-go" data-v="approved">' + L('تأكيد الأمر وإرساله', 'Confirm and send') + '</button>'
@@ -1742,7 +1750,13 @@ window.SAK_EN = {"،": ",", "و": "and", "لا": "No", "شهر": "mo", "شهر."
       else if (st === 'pending') act = S.canApprove ? '<span>' + L('بانتظار قرار الإدارة.', 'Waiting for a management decision.') + '</span><button class="btn" data-act="po-go" data-v="draft">' + L('إرجاع للمسودة', 'Return to draft') + '</button><button class="btn primary" data-act="po-go" data-v="approved">' + L('اعتماد الأمر', 'Approve PO') + '</button>'
         : '<span>' + L('بانتظار موافقة صاحب الصلاحية.', 'Waiting for an approver.') + '</span>';
       else if (st === 'received') act = '<span>' + L('مستلمة بتاريخ ', 'Received on ') + '<b class="num">' + esc(d.arrivedAt || '—') + '</b>' + (d.stocked ? L(' وأُضيفت كمياتها إلى المخزون.', ' and its quantities were added to stock.') : d.arrivedAt > S.settings.date ? L('، بانتظار ملف المخزون الجديد.', ', waiting for the new stock file.') : '') + '</span>';
-      else act = '<span>' + L('المرحلة التالية: ', 'Next stage: ') + '<b>' + SHIP_ST[STAGES[si + 1]] + '</b></span>' + (STAGES[si + 1] !== 'received' ? '<button class="btn" data-act="po-go" data-v="' + STAGES[si + 1] + '">' + L('نقل إلى ', 'Move to ') + SHIP_ST[STAGES[si + 1]] + '</button>' : '') + '<button class="btn primary" data-act="po-tab" data-v="recv">' + L('استلام البضاعة', 'Receive goods') + '</button>';
+      else act = '<span>' + L('المرحلة التالية: ', 'Next stage: ') + '<b>' + SHIP_ST[STAGES[si + 1]] + '</b></span>' + (si > STAGES.indexOf('approved') ? '<button class="btn" data-act="po-go" data-v="' + STAGES[si - 1] + '">' + L('إرجاع إلى ', 'Back to ') + SHIP_ST[STAGES[si - 1]] + '</button>' : '') + (STAGES[si + 1] !== 'received' ? '<button class="btn" data-act="po-go" data-v="' + STAGES[si + 1] + '">' + L('نقل إلى ', 'Move to ') + SHIP_ST[STAGES[si + 1]] + '</button>' : '') + '<button class="btn primary" data-act="po-tab" data-v="recv">' + L('استلام البضاعة', 'Receive goods') + '</button>';
+      if (S.confirmMove) {
+        var to = S.confirmMove, back = STAGES.indexOf(to) < si;
+        act = '<span><b>' + L(back ? 'إرجاع' : 'نقل', back ? 'Move back' : 'Move') + ' ' + esc(d.no || '') + '</b> ' + L('من', 'from') + ' «' + SHIP_ST[st] + '» ' + L('إلى', 'to') + ' «<b>' + SHIP_ST[to] + '</b>»' +
+          (to === 'approved' && (st === 'draft' || st === 'pending') ? L('. بعد الاعتماد يُحسب ضمن الوارد ولا يغيّر الأصناف والكميات إلا الأدمن.', '. Once approved it counts as inbound and only an admin can change items and quantities.') : '') + '؟</span>' +
+          '<button class="btn" data-act="po-go-cancel">' + L('إلغاء', 'Cancel') + '</button><button class="btn primary" data-act="po-go-ok">' + L('نعم، تأكيد', 'Yes, confirm') + '</button>';
+      }
     }
     if (act) h += '<div class="next">' + act + '</div>';
     h += '<div class="tabs" role="tablist">' + [['items', 'الأصناف والأسعار', 'Items & prices'], ['costs', 'المصاريف والجمارك', 'Costs & duty'], ['ship', 'الشحن والتتبع', 'Shipping & tracking'], ['recv', 'الاستلام', 'Receiving'], ['pay', 'الدفعات', 'Payments']].map(function (t) { return '<button role="tab" data-act="po-tab" data-v="' + t[0] + '" aria-selected="' + (tab === t[0]) + '">' + L(t[1], t[2]) + '</button>'; }).join('') + '</div>';
@@ -2160,7 +2174,7 @@ window.SAK_EN = {"،": ",", "و": "and", "لا": "No", "شهر": "mo", "شهر."
     'ship-filter': function (el) { S.shipFilter = el.dataset.v; render(); },
     'new-ship': function (el) { S.editor = newPo(el && el.dataset.v ? el.dataset.v : ''); S.poTab = 'items'; if (S.view !== 'orders') location.hash = '#orders'; else render(); },
     'edit-ship': function (el, ev) { ev.preventDefault(); openPo(el.dataset.v, el.dataset.tab); hideSearch(); },
-    'close-ship': function () { S.editor = null; render(); },
+    'close-ship': function () { S.editor = null; S.confirmMove = null; render(); },
     'ship-from-plan': function (el) {
       var ex = draftFor(el.dataset.v); if (ex) return openPo(ex.id);
       var p = D.plan.suppliers.filter(function (x) { return x.name === el.dataset.v; })[0]; if (!p) return;
@@ -2173,15 +2187,18 @@ window.SAK_EN = {"،": ",", "و": "and", "لا": "No", "شهر": "mo", "شهر."
       S.editor = d; S.poTab = 'items'; location.hash = '#orders'; if (S.view === 'orders') render();
     },
     'tab': function (el) { S[el.dataset.k] = el.dataset.v; render(); },
-    'po-tab': function (el) { S.poTab = el.dataset.v; render(); },
-    'po-go': function (el) {
-      var d = S.editor, v = el.dataset.v, prev = stOf(d), t = todayIso();
+    'po-tab': function (el) { S.poTab = el.dataset.v; S.confirmMove = null; render(); },
+    'po-go': function (el) { if (el.dataset.v === stOf(S.editor)) return; S.confirmMove = el.dataset.v; render(); var a = document.querySelector('[data-act="po-go-ok"]'); if (a) a.focus(); },
+    'po-go-cancel': function () { S.confirmMove = null; render(); },
+    'po-go-ok': function () {
+      var d = S.editor, v = S.confirmMove, prev = stOf(d), t = todayIso(); S.confirmMove = null; if (!v) return;
       d.status = v; d.log = d.log || {}; d.log[v] = t;
       if (v === 'pending') d.submittedAt = t;
       if (v === 'approved' && (prev === 'draft' || prev === 'pending')) { d.approvedAt = t; d.approvedBy = S.uid || ''; }
       if (!ACT['save-ship']()) d.status = prev;
     },
-    'po-receive': function () {
+    'po-receive': function (el) {
+      if (el && el.dataset.sure !== '1') { el.dataset.sure = '1'; el.textContent = L('اضغط مرة ثانية لتسجيل الاستلام', 'Press again to record the receipt'); el.classList.add('danger'); return; }
       var d = S.editor, prev = d.status; d._justReceived = true; d.status = 'received'; if (!d.claimStatus && claimInfo(d).rows.length) d.claimStatus = 'open'; d.log = d.log || {}; d.log.received = d.arrivedAt || todayIso();
       if (!d.arrivedAt) d.arrivedAt = todayIso();
       if (!ACT['save-ship']()) d.status = prev;
