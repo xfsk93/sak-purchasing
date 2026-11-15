@@ -702,11 +702,11 @@ window.SAK_EN = {"،": ",", "و": "and", "لا": "No", "شهر": "mo", "شهر."
     // rOut = run-out day, rNext = first inbound after that day (null if none), rGap = days without stock until rNext
     // (or until an order placed today arrives, if no inbound comes first).
     function runout(r) {
-      r.rOut = null; r.rNext = null; r.rGap = 0;
+      r.rOut = null; r.rNext = null; r.rGap = 0; r.rNextNo = ''; r.rNextStatus = '';
       if (!(r.H > 0)) return;
       var perDay = r.H / 30, arrive = D0 + Math.round(r.G * 30), level = r.F, day = D0, out = null;
       var ev = r.inb.filter(function (x) { return x.eta !== null && x.qty > 0; })
-        .map(function (x) { return { day: Math.max(x.eta, D0), qty: x.qty }; })
+        .map(function (x) { return { day: Math.max(x.eta, D0), qty: x.qty, no: x.no, status: x.status }; })
         .sort(function (a, b) { return a.day - b.day; });
       if (level <= 0 && !(ev.length && ev[0].day === D0)) out = D0;
       for (var i = 0; out === null && i < ev.length && ev[i].day <= arrive; i++) {
@@ -717,7 +717,7 @@ window.SAK_EN = {"،": ",", "و": "and", "لا": "No", "شهر": "mo", "شهر."
       if (out === null && level - perDay * (arrive - day) < 0) out = day + Math.max(0, level) / perDay;
       if (out === null || out >= arrive) return;
       r.rOut = Math.floor(out);
-      for (var k = 0; k < ev.length; k++) if (ev[k].day > out) { r.rNext = ev[k].day; break; }
+      for (var k = 0; k < ev.length; k++) if (ev[k].day > out) { r.rNext = ev[k].day; r.rNextNo = ev[k].no || ''; r.rNextStatus = ev[k].status || ''; break; }
       r.rGap = Math.max(0, Math.round((r.rNext !== null ? Math.min(r.rNext, arrive) : arrive) - out));
     }
     function timing(r) {
@@ -744,7 +744,7 @@ window.SAK_EN = {"،": ",", "و": "and", "لا": "No", "شهر": "mo", "شهر."
     var rows = skus.map(function (s) {
       var r = { sku: s, code: s.code, sup: supplierOf(s) };
       r.E = N(s.moq); r.F = N(s.stock); r.G = N(s.lt); r.H = N(s.avg); r.I = N(s.cap20); r.J = N(s.cap40);
-      var inb = (s.inbound || []).map(function (x) { return { qty: N(x.qty), eta: dayNum(x.eta) }; });
+      var inb = (s.inbound || []).map(function (x) { return { qty: N(x.qty), eta: dayNum(x.eta), no: x.no, status: x.status }; });
       r.inb = inb;
       function within(d) {
         var t = 0;
@@ -1075,15 +1075,25 @@ window.SAK_EN = {"،": ",", "و": "and", "لا": "No", "شهر": "mo", "شهر."
     if (r.CR.indexOf('override') > 0) return 'نعم – التعديل أقل من الخطة';
     return 'نعم – التغطية ' + f1(r.CF) + ' شهر فوق الحد الأعلى';
   }
+  function poNear(r) {
+    var best = null, bd = 1e9;
+    S.shipments.forEach(function (s) {
+      var st = stOf(s); if (s.supplier !== r.sup || ['draft', 'pending', 'approved', 'production'].indexOf(st) < 0 || !s.eta) return;
+      var dd = Math.abs(E.dayNum(s.eta) - r.tArrive); if (dd <= 45 && dd < bd) { bd = dd; best = s; }
+    });
+    return best;
+  }
+  function stName(st) { return SHIP_ST[!st || st === 'po' ? 'approved' : st] || st; }
   function timingText(r) {
     if (!r.tAlert) return '';
-    var arr = E.dayIso(r.tArrive), qty = f0(r.tQty);
+    var arr = E.dayIso(r.tArrive), qty = f0(r.tQty), po = r.tQty > 0 ? poNear(r) : null;
+    var addTxt = po ? L('لا تنشئ أمراً جديداً: الأمر ' + po.no + ' (' + stName(po.status) + '، يصل ' + po.eta + ') يصل في نفس الوقت تقريباً. أضف إليه نحو ' + qty + ' كرتون.', 'Do not create a new PO: ' + po.no + ' (' + stName(po.status) + ', arriving ' + po.eta + ') lands at about the same time. Add about ' + qty + ' CTN to it.') : null;
     if (r.tStockout !== null) return L('ينفد المخزون نحو ' + E.dayIso(r.tStockout) + '، وأي طلب اليوم يصل نحو ' + arr + '. الوارد البعيد يخفي هذه الحاجة. ', 'Stock runs out around ' + E.dayIso(r.tStockout) + ' and an order placed today arrives around ' + arr + '. Far-off inbound hides this need. ') +
-      (r.tQty > 0 ? L('اطلب الآن نحو ' + qty + ' كرتون واستعجل الوارد القريب.', 'Order about ' + qty + ' CTN now and expedite the nearest inbound.') : L('استعجل الوارد القريب.', 'Expedite the nearest inbound.'));
+      (addTxt ? addTxt + L(' واطلب من المورد تقديم شحنه.', ' And ask the supplier to bring it forward.') : r.tQty > 0 ? L('اطلب الآن نحو ' + qty + ' كرتون واستعجل الوارد القريب.', 'Order about ' + qty + ' CTN now and expedite the nearest inbound.') : L('استعجل الوارد القريب.', 'Expedite the nearest inbound.'));
     return L('عند وصول أي طلب اليوم (نحو ' + arr + ') يبقى ' + f0(Math.max(0, r.tAtArrival)) + ' كرتون فقط، أقل من مخزون الأمان. الوارد البعيد يخفي هذه الحاجة. ', 'When an order placed today arrives (around ' + arr + ') only ' + f0(Math.max(0, r.tAtArrival)) + ' CTN remain, below safety stock. Far-off inbound hides this need. ') +
-      (r.tQty > 0 ? L('اطلب الآن نحو ' + qty + ' كرتون.', 'Order about ' + qty + ' CTN now.') : '');
+      (addTxt ? addTxt : r.tQty > 0 ? L('اطلب الآن نحو ' + qty + ' كرتون.', 'Order about ' + qty + ' CTN now.') : '');
   }
-  function timingTag(r) { return r.tAlert ? ' <span class="tag ' + (r.tStockout !== null ? 'bad' : 'warn') + '" title="' + esc(timingText(r)) + '">' + L('حسب الوصول: ', 'By arrival: ') + f0(r.tQty) + '</span>' : ''; }
+  function timingTag(r) { if (!r.tAlert) return ''; var po = r.tQty > 0 ? poNear(r) : null; return ' <span class="tag ' + (r.tStockout !== null ? 'bad' : 'warn') + '" title="' + esc(timingText(r)) + '">' + (po ? L('أضف ', 'Add ') + f0(r.tQty) + L(' إلى ', ' to ') + esc(po.no) : L('حسب الوصول: ', 'By arrival: ') + f0(r.tQty)) + '</span>'; }
   function riskAr(r) { if (LANG === 'en') return r.CL || ''; return r.CE > 0 ? (r.stockOutDays > 0 ? 'ينفد قبل وصول الطلب بنحو ' + r.stockOutDays + ' يوم' : 'يكفي حتى وصول الطلب') : ''; }
   var LANG = 'ar';
   try { if (localStorage.getItem('sak-lang') === 'en') LANG = 'en'; } catch (e) { /* storage unavailable */ }
@@ -1525,12 +1535,18 @@ window.SAK_EN = {"،": ",", "و": "and", "لا": "No", "شهر": "mo", "شهر."
       return true;
     }).sort(function (a, b) { return S.f.st === '__runout' ? a.rOut - b.rOut || b.H - a.H : 0; });
   }
+  function runoutAction(r) {
+    var landNew = E.dayNum(S.settings.date) + Math.round(r.G * 30);
+    if (r.rNext !== null && r.rNext > landNew + 30) return { cls: 'bad', short: L('استعجل ', 'Expedite ') + (r.rNextNo || '') + L(' أو اطلب', ' or order'), long: L('عليه أمر ' + (r.rNextNo || '') + ' (' + stName(r.rNextStatus) + ') لكنه يصل ' + E.dayIso(r.rNext) + '، بعد موعد وصول طلب جديد (نحو ' + E.dayIso(landNew) + '). استعجله، وإن لم يمكن فاطلب كمية تسد الفترة حتى وصوله.', 'On order: ' + (r.rNextNo || '') + ' (' + stName(r.rNextStatus) + ') but it arrives ' + E.dayIso(r.rNext) + ', later than a new order would (about ' + E.dayIso(landNew) + '). Expedite it; if that is not possible, order enough to bridge until it arrives.') };
+    if (r.rNext !== null) return { cls: 'warn', short: L('استعجل ', 'Expedite ') + (r.rNextNo || ''), long: L('عليه أمر ' + (r.rNextNo || '') + ' (' + stName(r.rNextStatus) + '). استعجل التصنيع أو الشحن، ولا تُعِد الطلب: طلب جديد لن يصل قبله.', 'On order: ' + (r.rNextNo || '') + ' (' + stName(r.rNextStatus) + '). Expedite production or shipping; do not re-order, a new PO would not arrive sooner.') };
+    return { cls: 'bad', short: L('اطلب الآن', 'Order now'), long: L('لا يوجد أمر عليه. اطلب الآن، والانقطاع سيستمر حتى يصل الطلب.', 'Nothing on order. Order now; the gap lasts until the order arrives.') };
+  }
   function runoutText(r) {
     if (r.rOut === null) return '';
     var today = r.rOut <= E.dayNum(S.settings.date);
     return (today ? L('نافد الآن', 'Out now') : L('ينفد نحو ', 'Runs out around ') + E.dayIso(r.rOut)) + ' · ' +
       (r.rNext !== null ? L('أقرب وارد ', 'next inbound ') + E.dayIso(r.rNext) : L('لا وارد قبل وصول طلب جديد', 'no inbound before a new order could land')) + ' · ' +
-      L('نحو ' + r.rGap + ' يوم بدون مخزون', 'about ' + r.rGap + ' days without stock');
+      L('نحو ' + r.rGap + ' يوم بدون مخزون', 'about ' + r.rGap + ' days without stock') + '. ' + runoutAction(r).long;
   }
   function itemsTable() {
     var rows = filteredRows();
@@ -1538,11 +1554,11 @@ window.SAK_EN = {"،": ",", "و": "and", "لا": "No", "شهر": "mo", "شهر."
     if (!rows.length) return '<div class="empty">لا توجد أصناف مطابقة للبحث.</div>';
     if (S.f.st === '__runout') {
       var d0 = E.dayNum(S.settings.date);
-      return '<table><thead><tr><th>' + L('الكود', 'Code') + '</th><th>' + L('الصنف', 'Item') + '</th><th>' + L('المورد', 'Supplier') + '</th><th class="n">' + L('المخزون', 'Stock') + '</th><th class="n">' + L('مبيعات/شهر', 'Sales / mo') + '</th><th>' + L('ينفد', 'Runs out') + '</th><th>' + L('أقرب وارد', 'Next inbound') + '</th><th class="n">' + L('أيام بدون مخزون', 'Days without stock') + '</th><th class="n">' + L('اطلب الآن', 'Order now') + '</th></tr></thead><tbody>' +
-        rows.map(function (r) {
+      return '<table><thead><tr><th>' + L('الكود', 'Code') + '</th><th>' + L('الصنف', 'Item') + '</th><th>' + L('المورد', 'Supplier') + '</th><th class="n">' + L('المخزون', 'Stock') + '</th><th class="n">' + L('مبيعات/شهر', 'Sales / mo') + '</th><th>' + L('ينفد', 'Runs out') + '</th><th>' + L('أقرب وارد', 'Next inbound') + '</th><th class="n">' + L('أيام بدون مخزون', 'Days without stock') + '</th><th>' + L('الإجراء', 'Action') + '</th><th class="n">' + L('كمية الخطة', 'Plan qty') + '</th></tr></thead><tbody>' +
+        rows.map(function (r) { var ra = runoutAction(r);
           return '<tr class="click" data-act="open-sku" data-v="' + esc(r.code) + '"><td class="stripe st-' + ST[r.AG].i + ' num">' + esc(r.code) + '</td><td><div class="item-name" title="' + esc(r.sku.name) + '">' + esc(r.sku.name) + '</div></td><td>' + esc(r.sup) + '</td><td class="n">' + f0(r.F) + '</td><td class="n">' + f0(r.H) + '</td>' +
             '<td class="num"><b>' + (r.rOut <= d0 ? L('نافد الآن', 'Out now') : E.dayIso(r.rOut)) + '</b></td><td class="num">' + (r.rNext !== null ? E.dayIso(r.rNext) : '<span class="muted">' + L('لا يوجد', 'none') + '</span>') + '</td>' +
-            '<td class="n"><span class="tag ' + (r.rGap >= 30 ? 'bad' : 'warn') + '">' + r.rGap + '</span></td><td class="n">' + (r.CE > 0 ? '<b style="color:var(--accent)">' + f0(r.CE) + '</b>' : '—') + '</td></tr>';
+            '<td class="n"><span class="tag ' + (r.rGap >= 30 ? 'bad' : 'warn') + '">' + r.rGap + '</span></td><td><span class="tag ' + ra.cls + '" title="' + esc(ra.long) + '">' + esc(ra.short) + '</span></td><td class="n">' + (r.CE > 0 ? '<b style="color:var(--accent)">' + f0(r.CE) + '</b>' : '—') + '</td></tr>';
         }).join('') + '</tbody></table>';
     }
     if (S.simple) return '<table><thead><tr><th>' + L('الكود', 'Code') + '</th><th>' + L('الصنف', 'Item') + '</th><th>' + L('المورد', 'Supplier') + '</th><th>' + L('الحالة', 'Status') + '</th><th class="n">' + L('المخزون', 'Stock') + '</th><th class="n">' + L('مبيعات/شهر', 'Sales / mo') + '</th><th class="n">' + L('يكفي (شهر)', 'Covers (mo)') + '</th><th class="n">' + L('الوارد', 'Inbound') + '</th><th class="n">' + L('اطلب الآن', 'Order now') + '</th><th class="wrap">' + L('المطلوب', 'What to do') + '</th></tr></thead><tbody>' +
