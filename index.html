@@ -689,6 +689,31 @@ window.SAK_EN = {"،": ",", "و": "and", "لا": "No", "شهر": "mo", "شهر."
     ctrOverride = ctrOverride || {};
     var D0 = dayNum(st.date);
     var allowAbove = st.allowAbove === true || st.allowAbove === 'Yes';
+    // Timing check (added 2026-11-15, not in the workbook): the plan above adds ALL inbound to stock regardless of ETA.
+    // For items the plan does not order, project stock day by day to when an order placed today would arrive
+    // (today + lead time) and on through the cover target. If stock falls below safety stock in that window,
+    // flag it and suggest the quantity that keeps it at safety. Only adds fields (t*); Excel columns are unchanged.
+    function timing(r) {
+      r.tAlert = false; r.tQty = 0; r.tAtArrival = null; r.tStockout = null; r.tArrive = null; r.tShort = 0;
+      if (!(r.H > 0) || r.CE > 0) return;
+      var perDay = r.H / 30, arrive = D0 + Math.round(r.G * 30), safety = r.H * st.safety;
+      var ev = r.inb.filter(function (x) { return x.eta !== null && x.qty > 0; })
+        .map(function (x) { return { day: Math.max(x.eta, D0), qty: x.qty }; })
+        .sort(function (a, b) { return a.day - b.day; });
+      var level = r.F, day = D0, stockout = null, i = 0;
+      function runTo(t) { var next = level - perDay * (t - day); if (stockout === null && next < 0) stockout = day + Math.max(0, level) / perDay; level = next; day = t; }
+      for (; i < ev.length && ev[i].day <= arrive; i++) { runTo(ev[i].day); level += ev[i].qty; }
+      runTo(arrive);
+      r.tArrive = arrive; r.tAtArrival = level; r.tStockout = stockout === null ? null : Math.floor(stockout);
+      if (level >= safety - EPS) return;
+      // after arrival: stock starts from max(0, level); find the largest shortfall below safety until the cover horizon
+      var horizon = arrive + Math.round(r.AH * 30), lv = Math.max(0, level), d = arrive, short = 0;
+      function check(t) { lv -= perDay * (t - d); d = t; if (safety - lv > short) short = safety - lv; }
+      for (; i < ev.length && ev[i].day <= horizon; i++) { check(ev[i].day); lv += ev[i].qty; }
+      check(horizon);
+      r.tAlert = true; r.tShort = short;
+      r.tQty = short > EPS ? (r.E > 0 ? ceilTo(round(short, 6), r.E) : Math.ceil(short - 1e-9)) : 0;
+    }
     var rows = skus.map(function (s) {
       var r = { sku: s, code: s.code, sup: supplierOf(s) };
       r.E = N(s.moq); r.F = N(s.stock); r.G = N(s.lt); r.H = N(s.avg); r.I = N(s.cap20); r.J = N(s.cap40);
@@ -848,6 +873,7 @@ window.SAK_EN = {"،": ",", "و": "and", "لا": "No", "شهر": "mo", "شهر."
       else if (r.CE > 0 && r.CF > st.maxCover + EPS) r.CR = 'YES – cover ' + r.CF.toFixed(1) + ' mo above MAX';
       else if (hasOv && r.CE < r.CD) r.CR = 'YES – override below plan';
       else r.CR = '';
+      timing(r);
       if (s.stockMissing) r.CT = 'Code not in STOCK ALL – stock 0 used';
       else if (r.CE > 0 && r.AP === 0) r.CT = 'No container capacity – supplier avg used';
       else if (r.CE > 0 && (r.AO === '40ft' || r.AO === 'Both') && r.J === 0) r.CT = 'No 40ft capacity – estimated 2 x 20ft';
@@ -1021,6 +1047,15 @@ window.SAK_EN = {"،": ",", "و": "and", "لا": "No", "شهر": "mo", "شهر."
     if (r.CR.indexOf('override') > 0) return 'نعم – التعديل أقل من الخطة';
     return 'نعم – التغطية ' + f1(r.CF) + ' شهر فوق الحد الأعلى';
   }
+  function timingText(r) {
+    if (!r.tAlert) return '';
+    var arr = E.dayIso(r.tArrive), qty = f0(r.tQty);
+    if (r.tStockout !== null) return L('ينفد المخزون نحو ' + E.dayIso(r.tStockout) + '، وأي طلب اليوم يصل نحو ' + arr + '. الوارد البعيد يخفي هذه الحاجة. ', 'Stock runs out around ' + E.dayIso(r.tStockout) + ' and an order placed today arrives around ' + arr + '. Far-off inbound hides this need. ') +
+      (r.tQty > 0 ? L('اطلب الآن نحو ' + qty + ' كرتون واستعجل الوارد القريب.', 'Order about ' + qty + ' CTN now and expedite the nearest inbound.') : L('استعجل الوارد القريب.', 'Expedite the nearest inbound.'));
+    return L('عند وصول أي طلب اليوم (نحو ' + arr + ') يبقى ' + f0(Math.max(0, r.tAtArrival)) + ' كرتون فقط، أقل من مخزون الأمان. الوارد البعيد يخفي هذه الحاجة. ', 'When an order placed today arrives (around ' + arr + ') only ' + f0(Math.max(0, r.tAtArrival)) + ' CTN remain, below safety stock. Far-off inbound hides this need. ') +
+      (r.tQty > 0 ? L('اطلب الآن نحو ' + qty + ' كرتون.', 'Order about ' + qty + ' CTN now.') : '');
+  }
+  function timingTag(r) { return r.tAlert ? ' <span class="tag ' + (r.tStockout !== null ? 'bad' : 'warn') + '" title="' + esc(timingText(r)) + '">' + L('حسب الوصول: ', 'By arrival: ') + f0(r.tQty) + '</span>' : ''; }
   function riskAr(r) { if (LANG === 'en') return r.CL || ''; return r.CE > 0 ? (r.stockOutDays > 0 ? 'ينفد قبل وصول الطلب بنحو ' + r.stockOutDays + ' يوم' : 'يكفي حتى وصول الطلب') : ''; }
   var LANG = 'ar';
   try { if (localStorage.getItem('sak-lang') === 'en') LANG = 'en'; } catch (e) { /* storage unavailable */ }
@@ -1382,6 +1417,8 @@ window.SAK_EN = {"،": ",", "و": "and", "لا": "No", "شهر": "mo", "شهر."
     if (age > 7) add(1, age, 'يوماً منذ آخر تحديث للمخزون. ارفع ملف المخزون الجديد.', 'days since stock was last updated. Upload the new stock file.', 'data', 'تحديث المخزون', 'Update stock');
     var manual = p.rows.filter(function (r) { return r.sku.avgSrc !== 'auto'; }).length;
     if (manual) add(4, manual, 'صنف متوسط مبيعاته مُدخل يدوياً. ارفع ملف المبيعات ليُحسب تلقائياً.', 'SKUs use a manually typed sales average. Upload the sales file to calculate it automatically.', 'data', 'تحديث المبيعات', 'Update sales');
+    var timed = p.rows.filter(function (r) { return r.tAlert; }).length;
+    if (timed) add(1, timed, 'صنف ستقل عن مخزون الأمان قبل أن يصل أي طلب جديد، والخطة لا تطلبها لأن الوارد البعيد يُحسب كأنه موجود. راجعها في «كل الأصناف».', 'SKUs will drop below safety stock before any new order can arrive; the plan orders none because far-off inbound is counted as if on hand. Review them under All SKUs.', 'items', 'مراجعة', 'Review');
     var gapped = p.rows.filter(function (r) { return r.sku.avgSrc === 'auto' && r.sku.avgGaps > 0; }).length;
     if (gapped) add(2, gapped, 'صنف متوسطه محسوب بأشهر أقل لأن تقرير مبيعات شهر أو أكثر لم يُرفع. ارفع الأشهر الناقصة.', 'SKUs have an average built from fewer months because a month\'s sales report was not uploaded. Upload the missing months.', 'data', 'تحديث المبيعات', 'Update sales');
     var oc = S.shipments.filter(function (s) { return s.claimStatus === 'open'; }).length;
@@ -1461,7 +1498,7 @@ window.SAK_EN = {"،": ",", "و": "and", "لا": "No", "شهر": "mo", "شهر."
     if (!rows.length) return '<div class="empty">لا توجد أصناف مطابقة للبحث.</div>';
     if (S.simple) return '<table><thead><tr><th>' + L('الكود', 'Code') + '</th><th>' + L('الصنف', 'Item') + '</th><th>' + L('المورد', 'Supplier') + '</th><th>' + L('الحالة', 'Status') + '</th><th class="n">' + L('المخزون', 'Stock') + '</th><th class="n">' + L('مبيعات/شهر', 'Sales / mo') + '</th><th class="n">' + L('يكفي (شهر)', 'Covers (mo)') + '</th><th class="n">' + L('الوارد', 'Inbound') + '</th><th class="n">' + L('اطلب الآن', 'Order now') + '</th><th class="wrap">' + L('المطلوب', 'What to do') + '</th></tr></thead><tbody>' +
       rows.map(function (r) {
-        return '<tr class="click" data-act="open-sku" data-v="' + esc(r.code) + '"><td class="stripe st-' + ST[r.AG].i + ' num">' + esc(r.code) + '</td><td><div class="item-name" title="' + esc(r.sku.name) + '">' + esc(r.sku.name) + '</div></td><td>' + esc(r.sup) + '</td><td>' + pill(r.AG) + '</td><td class="n">' + f0(r.F) + '</td><td class="n">' + f0(r.H) + (r.sku.avgSrc === 'auto' ? ' <span class="tag good">' + L('تلقائي', 'auto') + '</span>' : '') + '</td><td class="n">' + f1(r.T) + '</td><td class="n">' + f0(r.Y) + '</td><td class="n">' + (r.CE > 0 ? '<b style="color:var(--accent)">' + f0(r.CE) + '</b>' : '—') + '</td><td class="wrap">' + ST[r.AG].act + '</td></tr>';
+        return '<tr class="click" data-act="open-sku" data-v="' + esc(r.code) + '"><td class="stripe st-' + ST[r.AG].i + ' num">' + esc(r.code) + '</td><td><div class="item-name" title="' + esc(r.sku.name) + '">' + esc(r.sku.name) + '</div></td><td>' + esc(r.sup) + '</td><td>' + pill(r.AG) + '</td><td class="n">' + f0(r.F) + '</td><td class="n">' + f0(r.H) + (r.sku.avgSrc === 'auto' ? ' <span class="tag good">' + L('تلقائي', 'auto') + '</span>' : '') + '</td><td class="n">' + f1(r.T) + '</td><td class="n">' + f0(r.Y) + '</td><td class="n">' + (r.CE > 0 ? '<b style="color:var(--accent)">' + f0(r.CE) + '</b>' : '—') + timingTag(r) + '</td><td class="wrap">' + ST[r.AG].act + '</td></tr>';
       }).join('') + '</tbody></table>';
     return '<table><thead><tr><th>الكود</th><th>الصنف</th><th>المورد</th><th>الحالة</th><th class="n">المخزون</th><th class="n">مبيعات/شهر</th><th class="n">التغطية</th><th class="n">الوارد</th><th>أقرب وصول</th><th class="n">التغطية بعد الوارد</th><th class="n">كمية القاعدة</th><th class="n">المقترح</th><th class="n">التغطية بعد الطلب</th><th>فحص التغطية</th><th class="n">التكلفة/كرتون</th></tr></thead><tbody>' +
       rows.map(function (r) {
@@ -2002,6 +2039,7 @@ window.SAK_EN = {"،": ",", "و": "and", "لا": "No", "شهر": "mo", "شهر."
         ['وصول الطلب', dt(r.CI)], ['المخزون عند الوصول', r.CJ === null ? '—' : f0(r.CJ)], ['التغطية عند الوصول', r.CK === null ? '—' : f2(r.CK)], ['موعد الطلب القادم', dt(r.CP)],
         ['كمية الطلب القادم', r.CQ === null ? '—' : f0(r.CQ)]]) +
         (r.CL ? '<p class="note ' + (r.stockOutDays ? 'bad' : '') + '" style="margin:12px 0 0">' + esc(riskAr(r)) + '</p>' : '') +
+        (r.tAlert ? '<p class="note ' + (r.tStockout !== null ? 'bad' : 'warn') + '" style="margin:12px 0 0"><b>' + L('تنبيه حسب تاريخ الوصول: ', 'Arrival-date check: ') + '</b>' + esc(timingText(r)) + '</p>' : '') +
         (r.CR ? '<p class="note warn" style="margin:8px 0 0">موافقة الإدارة: ' + esc(approvalAr(r)) + '</p>' : '') +
         (r.CT ? '<p class="note warn" style="margin:8px 0 0">' + esc(tr(r.CT)) + '</p>' : '') + '</div></div>';
       var inb = D.inboundBy[d.code] || [], c = D.cost[d.code];
