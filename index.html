@@ -391,7 +391,7 @@ input[type="text"], input[type="number"], input[type="date"], input[type="month"
   function T(ar, e) { return en() ? e : ar; }
   function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
   function clone(o) { return o == null ? o : JSON.parse(JSON.stringify(o)); }
-  function err(e) { var m = (e && (e.message || e.code)) || ''; return { code: /permission|policy|row-level|42501/i.test(m) ? 'invalid_argument' : /not_found|P0002/.test(m) ? 'invalid_argument' : 'unavailable', message: m }; }
+  function err(e) { var m = (e && (e.message || e.code)) || ''; if (/locked_after_approval|approval_required/.test(m)) return { code: m.match(/locked_after_approval|approval_required/)[0], message: m }; return { code: /permission|policy|row-level|42501/i.test(m) ? 'invalid_argument' : /not_found|P0002/.test(m) ? 'invalid_argument' : 'unavailable', message: m }; }
 
   /* ---------- data cache + realtime ---------- */
   var cache = {}, subs = [], session = null, me = null, loadP = null;
@@ -811,6 +811,9 @@ window.SAK_EN = {"،": ",", "و": "and", "لا": "No", "شهر": "mo", "شهر."
       var hasOv = s.override !== undefined && s.override !== null && s.override !== '';
       r.hasOverride = hasOv;
       r.CE = hasOv ? N(s.override) : r.CD;
+      // a manual quantity may not push cover above the absolute ceiling (unless the plan itself already does)
+      r.overrideCapped = null;
+      if (hasOv && r.H > 0 && r.CE > Math.max(r.AK, r.CD)) { r.overrideCapped = r.CE; r.CE = Math.max(r.AK, r.CD); }
       r.CF = r.H > 0 ? (r.pos + r.CE) / r.H : null;
       r.CG = r.CE / r.AQ;
       if (r.H === 0) r.CH = 'No sales history';
@@ -841,6 +844,7 @@ window.SAK_EN = {"،": ",", "و": "and", "لا": "No", "شهر": "mo", "شهر."
         r.CQ = Math.max(r.E, nq > 0 ? floorTo(round(nq, 6), r.E) : 0);
       } else { r.CP = null; r.CQ = null; }
       if (r.AG === 'HOLD (Mgmt Review)') r.CR = 'YES – overstock hold';
+      else if (r.overrideCapped !== null) r.CR = 'YES – override ' + r.overrideCapped + ' capped at ceiling (' + r.CE + ')';
       else if (r.CE > 0 && r.CF > st.maxCover + EPS) r.CR = 'YES – cover ' + r.CF.toFixed(1) + ' mo above MAX';
       else if (hasOv && r.CE < r.CD) r.CR = 'YES – override below plan';
       else r.CR = '';
@@ -1013,6 +1017,7 @@ window.SAK_EN = {"،": ",", "و": "and", "لا": "No", "شهر": "mo", "شهر."
     if (!r.CR) return '';
     if (LANG === 'en') return r.CR;
     if (r.CR.indexOf('overstock') > 0) return 'نعم – مخزون زائد معلّق';
+    if (r.CR.indexOf('capped') > 0) return 'نعم – التعديل ' + r.overrideCapped + ' خُفّض إلى السقف (' + r.CE + ')';
     if (r.CR.indexOf('override') > 0) return 'نعم – التعديل أقل من الخطة';
     return 'نعم – التغطية ' + f1(r.CF) + ' شهر فوق الحد الأعلى';
   }
@@ -1115,9 +1120,22 @@ window.SAK_EN = {"،": ",", "و": "and", "لا": "No", "شهر": "mo", "شهر."
     if (!keys.length) return null;
     var win = monthsBack(S.settings.date, Math.max(1, Math.round(N(S.settings.avgMonths)) || 3)).filter(function (m) { return m >= keys[0]; });
     if (!win.length || !win.some(function (m) { return sales[m] !== undefined; })) return null;
-    var t = 0, w = 0;
-    win.forEach(function (m, i) { var wt = S.settings.avgMethod === 'weighted' ? i + 1 : 1; t += N(sales[m]) * wt; w += wt; });
-    return t / w;
+    // a month counts as zero only if a sales report covering it was uploaded; otherwise it is unknown and left out
+    var covered = salesMonths(), t = 0, w = 0, gaps = 0;
+    win.forEach(function (m, i) {
+      var known = sales[m] !== undefined || covered[m];
+      if (!known) { gaps++; return; }
+      var wt = S.settings.avgMethod === 'weighted' ? i + 1 : 1; t += N(sales[m]) * wt; w += wt;
+    });
+    k._avgGaps = gaps;
+    return w ? t / w : null;
+  }
+  function salesMonths() {
+    // months covered by uploaded sales reports; older data without the list: any month that appears for any item
+    var o = {};
+    (S.settings.salesMonths || []).forEach(function (m) { o[m] = 1; });
+    if (!S.settings.salesMonths) S.skus.forEach(function (k) { Object.keys(k.sales || {}).forEach(function (m) { o[m] = 1; }); });
+    return o;
   }
   function derive() {
     var inbound = {};
@@ -1133,7 +1151,7 @@ window.SAK_EN = {"،": ",", "و": "and", "لا": "No", "شهر": "mo", "شهر."
     D.skuBy = {};
     var skus = S.skus.map(function (k) {
       var s = Object.assign({}, k, { stock: N(k.ruh) + N(k.jed) + N(k.dam), inbound: inbound[k.code] || [] });
-      s.avgAuto = autoAvg(k); s.avgManual = k.avg;
+      s.avgAuto = autoAvg(k); s.avgManual = k.avg; s.avgGaps = k._avgGaps || 0;
       s.avgSrc = k.avgMode !== 'manual' && s.avgAuto !== null ? 'auto' : 'manual';
       if (s.avgSrc === 'auto') s.avg = s.avgAuto;
       D.skuBy[k.code] = s;
@@ -1364,6 +1382,8 @@ window.SAK_EN = {"،": ",", "و": "and", "لا": "No", "شهر": "mo", "شهر."
     if (age > 7) add(1, age, 'يوماً منذ آخر تحديث للمخزون. ارفع ملف المخزون الجديد.', 'days since stock was last updated. Upload the new stock file.', 'data', 'تحديث المخزون', 'Update stock');
     var manual = p.rows.filter(function (r) { return r.sku.avgSrc !== 'auto'; }).length;
     if (manual) add(4, manual, 'صنف متوسط مبيعاته مُدخل يدوياً. ارفع ملف المبيعات ليُحسب تلقائياً.', 'SKUs use a manually typed sales average. Upload the sales file to calculate it automatically.', 'data', 'تحديث المبيعات', 'Update sales');
+    var gapped = p.rows.filter(function (r) { return r.sku.avgSrc === 'auto' && r.sku.avgGaps > 0; }).length;
+    if (gapped) add(2, gapped, 'صنف متوسطه محسوب بأشهر أقل لأن تقرير مبيعات شهر أو أكثر لم يُرفع. ارفع الأشهر الناقصة.', 'SKUs have an average built from fewer months because a month\'s sales report was not uploaded. Upload the missing months.', 'data', 'تحديث المبيعات', 'Update sales');
     var oc = S.shipments.filter(function (s) { return s.claimStatus === 'open'; }).length;
     if (oc) add(1, oc, 'مطالبة مورد مفتوحة لم تُرسل بعد.', 'supplier claims are open and not sent yet.', 'orders', 'فتح الأوامر', 'Open orders');
     var wait = S.shipments.filter(function (s) { return stOf(s) === 'received' && !s.stocked && s.arrivedAt && s.arrivedAt > S.settings.date; }).length;
@@ -2016,6 +2036,8 @@ window.SAK_EN = {"،": ",", "و": "and", "لا": "No", "شهر": "mo", "شهر."
   function toast(msg) { var t = $('#toast'); t.textContent = LANG === 'en' ? trText(msg) : msg; t.hidden = false; clearTimeout(toastT); toastT = setTimeout(function () { t.hidden = true; }, 3800); }
   function fail(e) {
     var code = e && e.code;
+    if (code === 'locked_after_approval') { toast(L('لم يُحفظ: بعد اعتماد الأمر لا يغيّر المورد أو الأصناف أو الكميات إلا الأدمن.', 'Not saved: after approval only an admin can change the supplier, items or quantities.')); return; }
+    if (code === 'approval_required') { toast(L('لم يُحفظ: اعتماد الأمر أو إلغاء اعتماده لمن له صلاحية الاعتماد فقط.', 'Not saved: only the approver can approve or un-approve a purchase order.')); return; }
     toast(code === 'invalid_argument' ? 'لم يُحفظ: لا تملك صلاحية التعديل أو البيانات غير صالحة.' : code === 'quota_exceeded' ? 'لم يُحفظ: امتلأت مساحة البيانات.' : 'تعذّر الحفظ. حاول مرة أخرى.');
   }
   function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
@@ -2367,7 +2389,10 @@ window.SAK_EN = {"،": ",", "و": "and", "لا": "No", "شهر": "mo", "شهر."
       Object.keys(a.agg[c]).forEach(function (mo) { body.sales[mo] = Math.round(a.agg[c][mo] * 100) / 100; });
       return write(function () { return S.db.doc('skus/' + c).update(body); }).then(function () { m.done = i; if (i % 10 === 0) render(); return sleep(40); }).then(next);
     }
-    next().then(function () { S.busy = false; S.simp = null; toast(L('تم حفظ مبيعات ' + codes.length + ' صنف وأُعيد حساب المتوسطات', 'Sales saved for ' + codes.length + ' SKUs and averages recalculated')); render(); })
+    var months = {}; codes.forEach(function (c) { Object.keys(a.agg[c]).forEach(function (mo) { months[mo] = 1; }); });
+    Object.keys(salesMonths()).forEach(function (mo) { months[mo] = 1; });
+    next().then(function () { return write(function () { return S.db.doc('config/settings').update({ salesMonths: Object.keys(months).sort() }); }); })
+      .then(function () { S.busy = false; S.simp = null; toast(L('تم حفظ مبيعات ' + codes.length + ' صنف وأُعيد حساب المتوسطات', 'Sales saved for ' + codes.length + ' SKUs and averages recalculated')); render(); })
       .catch(function (e) { S.busy = false; fail(e); render(); });
   }
   function applyImport() {
