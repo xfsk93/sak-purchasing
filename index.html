@@ -464,6 +464,7 @@ input[type="text"], input[type="number"], input[type="date"], input[type="month"
       return sb.rpc('sak_profiles').then(function (r) { var o = {}; (r.data || []).forEach(function (p) { o[p.id] = { name: p.name, email: p.email }; }); return o; });
     },
     access: true,
+    backup: true,
     signOut: function () { return sb.auth.signOut().then(function () { location.reload(); }); }
   };
 
@@ -581,7 +582,68 @@ input[type="text"], input[type="number"], input[type="date"], input[type="month"
     function refresh(msg) { sb.from('app_users').select('email,is_owner').order('added_at').then(function (r) { paint(r.data || [], msg); }); }
     refresh();
   }
-  new MutationObserver(function () { var b = document.getElementById('sak-access'); if (b) drawAccess(b); }).observe(document.documentElement, { childList: true, subtree: true });
+  /* ---------- backup & restore (Setup → Update data) ---------- */
+  function stamp(d) { var p = function (n) { return (n < 10 ? '0' : '') + n; }; d = d || new Date(); return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + '_' + p(d.getHours()) + p(d.getMinutes()); }
+  function fmt(iso) { var d = new Date(iso); return isNaN(d) ? iso : d.toLocaleString(en() ? 'en-GB' : 'ar-SA-u-nu-latn', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }); }
+  var KIND = { auto: ['تلقائية', 'automatic'], 'before-restore': ['قبل الاسترجاع', 'before restore'] };
+  function drawBackup(box) {
+    if (box.getAttribute('data-on')) return; box.setAttribute('data-on', '1');
+    var owner = me && me.is_owner, msg = '', list = [], armed = null;
+    function paint() {
+      box.innerHTML = '<p class="muted small" style="margin-top:0">' + T('تُحفظ نسخة تلقائية من كل البيانات يومياً الساعة 3 فجراً، ويُحتفظ بآخر 30 نسخة. وتستطيع تنزيل نسخة كاملة الآن واحفظها في مجلد المشروع.', 'A full automatic copy is saved every day at 3 AM and the last 30 are kept. You can also download a full copy now and keep it in your project folder.') + '</p>' +
+        '<div class="row" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px"><button class="btn primary" type="button" data-b="dl">' + T('تنزيل نسخة احتياطية الآن', 'Download backup now') + '</button>' +
+        (owner ? '<label class="btn" style="cursor:pointer">' + T('استرجاع من ملف…', 'Restore from file…') + '<input type="file" accept=".json,application/json" data-b="file" hidden></label>' : '') + '</div>' +
+        (owner && list.length ? '<div class="scroll"><table><thead><tr><th>' + T('النسخة', 'Copy') + '</th><th>' + T('النوع', 'Type') + '</th><th>' + T('السجلات', 'Records') + '</th><th></th></tr></thead><tbody>' +
+          list.map(function (b) { var k = KIND[b.kind] || [b.kind, b.kind]; return '<tr><td class="num">' + esc(fmt(b.taken_at)) + '</td><td>' + esc(T(k[0], k[1])) + '</td><td class="num">' + b.doc_count + '</td><td><button class="btn sm" type="button" data-b="rs" data-id="' + b.id + '">' + (armed === 's' + b.id ? T('تأكيد الاسترجاع', 'Confirm restore') : T('استرجاع', 'Restore')) + '</button></td></tr>'; }).join('') +
+          '</tbody></table></div>' : '') +
+        (owner ? '<p class="muted small">' + T('الاسترجاع يستبدل كل البيانات الحالية بالنسخة المختارة، ويحفظ نسخة من الوضع الحالي قبلها حتى تستطيع التراجع.', 'Restoring replaces all current data with the chosen copy, and saves a copy of the current state first so you can undo it.') + '</p>' : '') +
+        (msg ? '<p class="small"><b>' + esc(msg) + '</b></p>' : '');
+      box.querySelector('[data-b=dl]').onclick = function () {
+        msg = T('جارٍ التحضير…', 'Preparing…'); paint();
+        sb.rpc('sak_export').then(function (r) {
+          if (r.error) { msg = T('تعذّر التنزيل: النسخ الاحتياطي للأدمن فقط.', 'Could not download: backups are for admins only.'); paint(); return; }
+          downloads.save({ filename: 'SAK-backup-' + stamp() + '.json', data: JSON.stringify(r.data, null, 1), mimeType: 'application/json' });
+          msg = T('نُزّلت نسخة فيها ', 'Downloaded a copy with ') + r.data.docs.length + T(' سجلاً.', ' records.'); paint();
+        });
+      };
+      var f = box.querySelector('[data-b=file]');
+      if (f) f.onchange = function () {
+        var file = f.files && f.files[0]; if (!file) return;
+        file.text().then(function (t) {
+          var j; try { j = JSON.parse(t); } catch (e) { j = null; }
+          if (!j || j.system !== 'SAK Purchasing' || !Array.isArray(j.docs)) { msg = T('هذا الملف ليس نسخة احتياطية من النظام.', 'This file is not a backup from this system.'); paint(); return; }
+          armed = { file: j };
+          msg = T('الملف بتاريخ ', 'File from ') + fmt(j.exported_at) + T(' وفيه ', ' with ') + j.docs.length + T(' سجلاً. اضغط «تأكيد الاسترجاع من الملف» للمتابعة.', ' records. Press "Confirm restore from file" to continue.');
+          paint();
+          var c = document.createElement('button'); c.className = 'btn primary'; c.type = 'button'; c.textContent = T('تأكيد الاسترجاع من الملف', 'Confirm restore from file');
+          c.onclick = function () { restore(sb.rpc('sak_restore', { payload: armed.file })); };
+          box.querySelector('.row').appendChild(c);
+        });
+      };
+      box.querySelectorAll('[data-b=rs]').forEach(function (b) {
+        b.onclick = function () {
+          var id = b.getAttribute('data-id');
+          if (armed !== 's' + id) { armed = 's' + id; msg = ''; paint(); return; }
+          restore(sb.rpc('sak_restore_snapshot', { bid: +id }));
+        };
+      });
+    }
+    function restore(p) {
+      armed = null; msg = T('جارٍ الاسترجاع…', 'Restoring…'); paint();
+      p.then(function (r) {
+        if (r.error) { msg = T('تعذّر الاسترجاع.', 'Restore failed.') + ' ' + (r.error.message || ''); paint(); return; }
+        msg = T('تم الاسترجاع (', 'Restored (') + r.data + T(' سجلاً). سيُعاد تحميل الصفحة.', ' records). Reloading the page.'); paint();
+        setTimeout(function () { location.reload(); }, 1500);
+      });
+    }
+    function refresh() { if (!owner) { paint(); return; } sb.rpc('sak_backup_list').then(function (r) { list = r.data || []; paint(); }); }
+    refresh();
+  }
+
+  new MutationObserver(function () {
+    var b = document.getElementById('sak-access'); if (b) drawAccess(b);
+    var k = document.getElementById('sak-backup'); if (k) drawBackup(k);
+  }).observe(document.documentElement, { childList: true, subtree: true });
 
   /* ---------- start ---------- */
   sb.auth.getSession().then(function (r) {
@@ -1853,6 +1915,7 @@ window.SAK_EN = {"،": ",", "و": "and", "لا": "No", "شهر": "mo", "شهر."
     h += '<div class="card"><header><h2>' + L('2. المبيعات', '2. Sales') + '</h2><span class="muted small">' + (last ? L('آخر شهر مسجّل: ', 'Latest month on record: ') + '<span class="num">' + last + '</span> · ' : '') + '<span class="num">' + auto + '</span> ' + L('صنف متوسطه تلقائي', 'SKUs on automatic average') + '</span></header><div class="body">' +
       '<p style="margin-top:0">' + L('ارفع تقرير مبيعات المنتجات من دفترة. يكفي أن يحتوي عمود الكود وعمود الكمية، ومعهما عمود التاريخ إن وُجد. يُحسب متوسط المبيعات الشهري لكل صنف من آخر ', 'Upload the product sales report from Daftra. It needs a code column and a quantity column, plus a date column if available. Average monthly sales per SKU are calculated from the last ') + '<b class="num">' + esc(S.settings.avgMonths || 3) + '</b>' + L(' أشهر مكتملة.', ' completed months.') + '</p>' +
       (S.canWrite ? '<input type="file" id="sales-file" accept=".xlsx,.xls,.csv">' : '') + salesPreview() + '</div></div>';
+    if (S.user && S.user.backup) h += '<div class="card"><header><h2>' + L('3. النسخ الاحتياطي', '3. Backup') + '</h2></header><div class="body" id="sak-backup"></div></div>';
     return h;
   };
   function salesAgg() {
