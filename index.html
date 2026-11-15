@@ -1754,7 +1754,7 @@ window.SAK_EN = {"،": ",", "و": "and", "لا": "No", "شهر": "mo", "شهر."
       if (S.confirmMove) {
         var to = S.confirmMove, back = STAGES.indexOf(to) < si;
         act = '<span><b>' + L(back ? 'إرجاع' : 'نقل', back ? 'Move back' : 'Move') + ' ' + esc(d.no || '') + '</b> ' + L('من', 'from') + ' «' + SHIP_ST[st] + '» ' + L('إلى', 'to') + ' «<b>' + SHIP_ST[to] + '</b>»' +
-          (to === 'approved' && (st === 'draft' || st === 'pending') ? L('. بعد الاعتماد يُحسب ضمن الوارد ولا يغيّر الأصناف والكميات إلا الأدمن.', '. Once approved it counts as inbound and only an admin can change items and quantities.') : '') + '؟</span>' +
+          (to === 'approved' && (st === 'draft' || st === 'pending') ? L('. بعد الاعتماد يُحسب ضمن الوارد ولا يغيّر الأصناف والكميات إلا الأدمن.', '. Once approved it counts as inbound and only an admin can change items and quantities.') : '') + L('؟', '?') + '</span>' +
           '<button class="btn" data-act="po-go-cancel">' + L('إلغاء', 'Cancel') + '</button><button class="btn primary" data-act="po-go-ok">' + L('نعم، تأكيد', 'Yes, confirm') + '</button>';
       }
     }
