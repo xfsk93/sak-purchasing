@@ -2,6 +2,7 @@
 <html lang="ar" dir="rtl">
 <head>
 <meta charset="utf-8">
+<meta name="sak-build" content="20261116054017">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>SAK Purchasing</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -408,6 +409,37 @@ input[type="text"], input[type="number"], input[type="date"], input[type="month"
   function key(c, i) { return c + '/' + i; }
   function fire() { subs.slice().forEach(function (f) { try { f(); } catch (e) { console.error(e); } }); }
   function put(row) { cache[key(row.collection, row.id)] = row.data; }
+  var subscribedOnce = false, lastSync = 0;
+  function stable(v) { return v && typeof v === 'object' ? (Array.isArray(v) ? '[' + v.map(stable).join(',') + ']' : '{' + Object.keys(v).sort().map(function (k) { return JSON.stringify(k) + ':' + stable(v[k]); }).join(',') + '}') : JSON.stringify(v); }
+  function resync() {
+    if (!loadP) return;
+    lastSync = Date.now();
+    sb.from('docs').select('collection,id,data').range(0, 4999).then(function (r) {
+      if (r.error || !r.data) return;
+      var next = {}; r.data.forEach(function (row) { next[key(row.collection, row.id)] = row.data; });
+      if (stable(next) !== stable(cache)) { cache = next; fire(); }
+    });
+  }
+  // when the page comes back into view, and every 5 minutes, make sure the data is current
+  document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'visible' && Date.now() - lastSync > 20000) { resync(); checkVersion(); } });
+  setInterval(function () { if (document.visibilityState === 'visible') resync(); }, 5 * 60 * 1000);
+
+  // tell the user when a newer version of the page has been published
+  var BUILD = (document.querySelector('meta[name="sak-build"]') || {}).content || '';
+  function checkVersion() {
+    if (!BUILD) return;
+    fetch(location.pathname + '?v=' + Date.now(), { cache: 'no-store' }).then(function (r) { return r.text(); }).then(function (t) {
+      var m = /<meta name="sak-build" content="([^"]+)"/.exec(t);
+      if (!m || m[1] === BUILD || document.getElementById('sak-newver')) return;
+      var b = document.createElement('div'); b.id = 'sak-newver';
+      b.style.cssText = 'position:fixed;bottom:16px;inset-inline-start:50%;transform:translateX(-50%);z-index:9998;background:var(--ink,#111);color:var(--bg,#fff);padding:10px 14px;border-radius:12px;display:flex;gap:12px;align-items:center;box-shadow:0 8px 30px rgba(0,0,0,.2);font-size:14px';
+      b.innerHTML = '<span>' + T('نُشرت نسخة جديدة من النظام.', 'A new version of the system is available.') + '</span><button type="button" style="border:0;border-radius:8px;padding:6px 12px;font:inherit;font-weight:600;cursor:pointer;background:var(--accent,#2f4fe0);color:var(--accent-ink,#fff)">' + T('تحديث الآن', 'Refresh now') + '</button>';
+      b.querySelector('button').onclick = function () { location.reload(); };
+      document.body.appendChild(b);
+    }).catch(function () { /* offline */ });
+  }
+  setInterval(checkVersion, 10 * 60 * 1000);
+
   function load() {
     if (loadP) return loadP;
     loadP = sb.from('docs').select('collection,id,data').range(0, 4999).then(function (r) {
@@ -417,7 +449,10 @@ input[type="text"], input[type="number"], input[type="date"], input[type="month"
         if (p.eventType === 'DELETE') { if (p.old && p.old.collection) delete cache[key(p.old.collection, p.old.id)]; }
         else if (p.new) put(p.new);
         fire();
-      }).subscribe();
+      }).subscribe(function (status) {
+        // after a dropped connection (sleep, network change) fetch everything again so nothing is missed
+        if (status === 'SUBSCRIBED' && subscribedOnce) resync(); if (status === 'SUBSCRIBED') subscribedOnce = true;
+      });
     });
     return loadP;
   }
@@ -1263,7 +1298,7 @@ window.SAK_EN = {"،": ",", "و": "and", "لا": "No", "شهر": "mo", "شهر."
     }).join('، ') + '</p>';
   }
   /* Monthly sales page (Setup → Monthly sales): see and edit every item's monthly sales and its average in one table. */
-  function sgState() { return S.sg || (S.sg = { q: '', sup: '*', edits: {} }); }
+  function sgState() { return S.sg || (S.sg = { q: '', sup: '*', edits: {}, br: '' }); }
   function sgCount() { return Object.keys(sgState().edits).length; }
   function salesGridView() {
     var sg = sgState(), ro = S.canWrite ? '' : ' disabled', n = sgCount();
@@ -1271,7 +1306,9 @@ window.SAK_EN = {"،": ",", "و": "and", "لا": "No", "شهر": "mo", "شهر."
       (S.canWrite ? '<div class="actions"><button class="btn" data-act="sg-discard"' + (n ? '' : ' disabled') + '>' + L('تراجع', 'Discard') + '</button><button class="btn primary" id="sg-save" data-act="sg-save"' + (n ? '' : ' disabled') + '>' + L('حفظ التغييرات', 'Save changes') + (n ? ' (' + n + ')' : '') + '</button></div>' : '') + '</div>';
     var sups = D.plan.suppliers.map(function (x) { return x.name; });
     h += '<div class="filters"><div class="field" style="flex:1 1 220px"><input type="search" data-sgf="q" placeholder="' + L('ابحث بالكود أو الاسم', 'Search by code or name') + '" value="' + esc(sg.q) + '"></div><div class="field" style="flex:0 1 190px"><select data-sgf="sup"><option value="*">' + L('كل الموردين', 'All suppliers') + '</option>' + sups.map(function (x) { return '<option' + (sg.sup === x ? ' selected' : '') + ' value="' + esc(x) + '">' + esc(x || L('(بدون مورد)', '(no supplier)')) + '</option>'; }).join('') + '</select></div></div>';
-    h += '<div class="card"><div class="scroll" id="sg-wrap">' + sgTable(ro) + '</div></div>';
+    h += '<div class="chips" style="margin:0 0 12px">' + [['', L('الإجمالي (قابل للتعديل)', 'Total (editable)')], ['ruh', L('الرياض', 'Riyadh')], ['jed', L('جدة', 'Jeddah')], ['dam', L('الدمام', 'Dammam')], ['all', L('الفروع معاً', 'All branches')]].map(function (b) { return '<button class="chip" data-act="sg-br" data-v="' + b[0] + '" aria-pressed="' + (sg.br === b[0]) + '">' + b[1] + '</button>'; }).join('') + '</div>';
+    if (sg.br) h += '<p class="muted small" style="margin:-4px 0 10px">' + L('مبيعات الفروع من رقم الفاتورة (R الرياض، J جدة، D الدمام). للعرض فقط؛ التعديل في «الإجمالي». الشهر بلا تقسيم يظهر «—».', 'Branch sales come from the invoice number (R Riyadh, J Jeddah, D Dammam). View only; edit under Total. Months without a split show “—”.') + '</p>';
+    h += '<div class="card"><div class="scroll" id="sg-wrap">' + (sg.br ? sgBranchTable() : sgTable(ro)) + '</div></div>';
     h += '<p class="muted small">' + L('علامة «نفاد» تحت الشهر: النظام استنتج من ملف المبيعات أن الصنف كان نافداً تلك الأيام، فصحّح مبيعات الشهر في المتوسط. «تلقائي» يحسب المتوسط من المبيعات حسب القواعد، و«يدوي» يستخدم الرقم الذي تكتبه.', 'An "out" tag under a month: the system inferred from the sales file that the item was out of stock those days and corrected that month in the average. "Auto" averages the sales per the rules; "Manual" uses the number you type.') + '</p>';
     return h;
   }
@@ -1291,6 +1328,22 @@ window.SAK_EN = {"،": ",", "و": "and", "لا": "No", "شهر": "mo", "شهر."
           '<td class="n"><b>' + f0(r.H) + '</b></td><td><select data-sg="' + esc(r.code) + '" data-sgm="mode"' + ro + '><option value="auto"' + (mode === 'auto' ? ' selected' : '') + '>' + L('تلقائي', 'Auto') + '</option><option value="manual"' + (mode === 'manual' ? ' selected' : '') + '>' + L('يدوي', 'Manual') + '</option></select></td>' +
           '<td class="n"><input type="number" min="0" step="any" class="sgi' + (e.avg !== undefined ? ' changed' : '') + '" data-sg="' + esc(r.code) + '" data-sgm="avg" value="' + (man === undefined || man === null ? '' : esc(man)) + '"' + ro + '></td></tr>';
       }).join('') + '</tbody></table>';
+  }
+  function sgBranchTable() {
+    var sg = sgState(), q = sg.q.trim().toLowerCase(), ms = monthsBack(S.settings.date, 6), ok = {};
+    (S.settings.salesMonthsBr || []).forEach(function (m) { ok[m] = 1; });
+    var BR = sg.br === 'all' ? [['ruh', L('الرياض', 'Riyadh')], ['jed', L('جدة', 'Jeddah')], ['dam', L('الدمام', 'Dammam')]] : [[sg.br, '']];
+    var bms = ms.filter(function (m) { return ok[m]; });
+    var rows = D.plan.rows.filter(function (r) { return (sg.sup === '*' || r.sup === sg.sup) && (!q || String(r.code).toLowerCase().indexOf(q) >= 0 || String(r.sku.name || '').toLowerCase().indexOf(q) >= 0); });
+    function avg(sb, b) { if (!bms.length) return null; var t = 0; bms.forEach(function (m) { t += N(((sb || {})[b] || {})[m]); }); return t / bms.length; }
+    if (sg.br === 'all') return '<table class="sg"><thead><tr><th>' + L('الكود', 'Code') + '</th><th>' + L('الصنف', 'Item') + '</th><th>' + L('المورد', 'Supplier') + '</th>' + BR.map(function (b) { return '<th class="n">' + b[1] + '</th>'; }).join('') + '<th class="n">' + L('الإجمالي', 'Total') + '</th><th class="n">' + L('مخزون الرياض', 'Riyadh stock') + '</th><th class="n">' + L('مخزون جدة', 'Jeddah stock') + '</th><th class="n">' + L('مخزون الدمام', 'Dammam stock') + '</th></tr></thead><tbody>' +
+      rows.map(function (r) { var k = r.sku, sb = k.salesBr || {}, tot = 0, cells = BR.map(function (b) { var a = avg(sb, b[0]); tot += a || 0; return '<td class="n">' + (a === null ? '—' : f0(a)) + '</td>'; }).join('');
+        return '<tr><td class="num">' + esc(r.code) + '</td><td><div class="item-name" title="' + esc(k.name) + '">' + esc(k.name) + '</div></td><td>' + esc(r.sup) + '</td>' + cells + '<td class="n"><b>' + f0(tot) + '</b></td><td class="n">' + f0(N(k.ruh)) + '</td><td class="n">' + f0(N(k.jed)) + '</td><td class="n">' + f0(N(k.dam)) + '</td></tr>'; }).join('') + '</tbody></table>' +
+      '<p class="muted small" style="margin:8px 12px">' + L('متوسط شهري لكل فرع عن الأشهر المقسمة: ', 'Monthly average per branch over the split months: ') + '<span class="num">' + (bms.join('، ') || '—') + '</span></p>';
+    var b = sg.br;
+    return '<table class="sg"><thead><tr><th>' + L('الكود', 'Code') + '</th><th>' + L('الصنف', 'Item') + '</th><th>' + L('المورد', 'Supplier') + '</th>' + ms.map(function (m) { return '<th class="n num">' + m + '</th>'; }).join('') + '<th class="n">' + L('المتوسط', 'Average') + '</th><th class="n">' + L('مخزون الفرع', 'Branch stock') + '</th></tr></thead><tbody>' +
+      rows.map(function (r) { var k = r.sku, row = ((k.salesBr || {})[b]) || {}, a = avg(k.salesBr, b);
+        return '<tr><td class="num">' + esc(r.code) + '</td><td><div class="item-name" title="' + esc(k.name) + '">' + esc(k.name) + '</div></td><td>' + esc(r.sup) + '</td>' + ms.map(function (m) { return '<td class="n">' + (!ok[m] ? '<span class="muted">—</span>' : f0(N(row[m]))) + '</td>'; }).join('') + '<td class="n"><b>' + (a === null ? '—' : f0(a)) + '</b></td><td class="n">' + f0(N(k[b])) + '</td></tr>'; }).join('') + '</tbody></table>';
   }
   function sgRefreshSave() { var n = sgCount(), b = $('#sg-save'); if (b) { b.disabled = !n; b.textContent = L('حفظ التغييرات', 'Save changes') + (n ? ' (' + n + ')' : ''); } var d = $('[data-act="sg-discard"]'); if (d) d.disabled = !n; }
   function branchSalesTable(d, sm) {
@@ -2323,6 +2376,7 @@ window.SAK_EN = {"،": ",", "و": "and", "لا": "No", "شهر": "mo", "شهر."
     'new-sku': function () { openSku(null); },
     'close-drawer': function () { S.drawer = null; S.supDrawer = null; renderDrawer(); },
     'close-drawer-bg': function (el, ev) { if (ev.target === el) { S.drawer = null; S.supDrawer = null; renderDrawer(); } },
+    'sg-br': function (el) { sgState().br = el.dataset.v; render(); },
     'sg-discard': function () { sgState().edits = {}; render(); },
     'sg-save': function () {
       var sg = sgState(), codes = Object.keys(sg.edits), i = 0; if (!codes.length || S.busy) return;
@@ -2502,7 +2556,7 @@ window.SAK_EN = {"،": ",", "و": "and", "لا": "No", "شهر": "mo", "شهر."
     if (ds.in === 'sup') { S.f.sup = val; var w2 = $('#items-wrap'); if (w2) { w2.innerHTML = itemsTable(); localize(w2); } return; }
     if (ds.ks && S.drawer) { var sv = numOrNull(val); if (sv === null) delete S.drawer.d.sales[ds.ks]; else S.drawer.d.sales[ds.ks] = sv; return; }
     if (ds.sim && S.simp) { S.simp[ds.sim] = val; render(); return; }
-    if (ds.sgf) { sgState()[ds.sgf] = val; var sw = $('#sg-wrap'); if (sw) { sw.innerHTML = sgTable(S.canWrite ? '' : ' disabled'); localize(sw); } return; }
+    if (ds.sgf) { sgState()[ds.sgf] = val; var sw = $('#sg-wrap'); if (sw) { sw.innerHTML = sgState().br ? sgBranchTable() : sgTable(S.canWrite ? '' : ' disabled'); localize(sw); } return; }
     if (ds.sg) {
       var sgs = sgState(), ed = sgs.edits[ds.sg] = sgs.edits[ds.sg] || {};
       if (ds.sgm === 'mode') ed.avgMode = val; else if (ds.sgm === 'avg') ed.avg = numOrNull(val); else { ed.sales = ed.sales || {}; ed.sales[ds.sgm] = numOrNull(val); }
