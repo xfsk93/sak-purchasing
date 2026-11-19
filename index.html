@@ -2,7 +2,7 @@
 <html lang="ar" dir="rtl">
 <head>
 <meta charset="utf-8">
-<meta name="sak-build" content="20261119192947">
+<meta name="sak-build" content="20261119194204">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>SAK Purchasing</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -371,6 +371,10 @@ tr.sub > td { background: var(--sunken); padding: 8px 12px 12px; }
 table.mini { width: 100%; font-size: 13px; }
 table.mini th { font-size: 11px; }
 
+/* frozen SKUs */
+.st-8 { --pc: #5b7fa6; --pb: rgba(91,127,166,.14); --c: #5b7fa6; }
+.frozen-card { border: 1px solid #5b7fa6; }
+
 </style>
 </head>
 <body>
@@ -730,7 +734,7 @@ window.SAK_EN = {"،": ",", "و": "and", "لا": "No", "شهر": "mo", "شهر."
   }
 
   var STATUSES = ['CRITICAL', 'URGENT', 'ORDER NEXT', 'RECEIVE INBOUND / MONITOR', 'DO NOT ORDER',
-    'HOLD (Mgmt Review)', 'REDUCE / SALES PUSH', 'NO SALES / REVIEW'];
+    'HOLD (Mgmt Review)', 'REDUCE / SALES PUSH', 'NO SALES / REVIEW', 'FROZEN'];
 
   /* skus: [{code,brand,group,moq,stock,lt,avg,cap20,cap40,inbound:[{qty,eta}],override,approved,stockMissing}]
      st: {date,safety,overAdd,hold,reduce,critical,window,minCover,maxCover,allowAbove,ceiling}
@@ -749,7 +753,7 @@ window.SAK_EN = {"،": ",", "و": "and", "لا": "No", "شهر": "mo", "شهر."
     // (or until an order placed today arrives, if no inbound comes first).
     function runout(r) {
       r.rOut = null; r.rNext = null; r.rGap = 0; r.rNextNo = ''; r.rNextStatus = '';
-      if (!(r.H > 0)) return;
+      if (!(r.H > 0) || r.frozen) return;
       var perDay = r.H / 30, arrive = D0 + Math.round(r.G * 30), level = r.F, day = D0, out = null;
       var ev = r.inb.filter(function (x) { return x.eta !== null && x.qty > 0; })
         .map(function (x) { return { day: Math.max(x.eta, D0), qty: x.qty, no: x.no, status: x.status }; })
@@ -768,7 +772,7 @@ window.SAK_EN = {"،": ",", "و": "and", "لا": "No", "شهر": "mo", "شهر."
     }
     function timing(r) {
       r.tAlert = false; r.tQty = 0; r.tQtyMoq = 0; r.tAtArrival = null; r.tStockout = null; r.tArrive = null; r.tShort = 0;
-      if (!(r.H > 0) || r.CE > 0) return;
+      if (!(r.H > 0) || r.CE > 0 || r.frozen) return;
       var perDay = r.H / 30, arrive = D0 + Math.round(r.G * 30), safety = r.H * st.safety;
       var ev = r.inb.filter(function (x) { return x.eta !== null && x.qty > 0; })
         .map(function (x) { return { day: Math.max(x.eta, D0), qty: x.qty }; })
@@ -833,6 +837,10 @@ window.SAK_EN = {"،": ",", "و": "and", "لا": "No", "شهر": "mo", "شهر."
       r.AI = gapTo(r.AH, ceilTo);
       r.AJ = gapTo(st.maxCover, floorTo);
       r.AK = gapTo(st.ceiling, floorTo);
+      // Frozen by the planner (added 2026-11-19, not in the workbook): never ordered, never used as container filler,
+      // and it does not make its supplier "due". Stock, cover and inbound are still calculated for information.
+      r.frozen = !!s.frozen;
+      if (r.frozen) { r.AG = 'FROZEN'; r.AF = 0; r.AI = 0; r.AJ = 0; r.AK = 0; }
       return r;
     });
 
@@ -910,13 +918,14 @@ window.SAK_EN = {"،": ",", "و": "and", "لا": "No", "شهر": "mo", "شهر."
       var s = r.sku;
       var hasOv = s.override !== undefined && s.override !== null && s.override !== '';
       r.hasOverride = hasOv;
-      r.CE = hasOv ? N(s.override) : r.CD;
+      r.CE = r.frozen ? 0 : hasOv ? N(s.override) : r.CD;
       // a manual quantity may not push cover above the absolute ceiling (unless the plan itself already does)
       r.overrideCapped = null;
       if (hasOv && r.H > 0 && r.CE > Math.max(r.AK, r.CD)) { r.overrideCapped = r.CE; r.CE = Math.max(r.AK, r.CD); }
       r.CF = r.H > 0 ? (r.pos + r.CE) / r.H : null;
       r.CG = r.CE / r.AQ;
-      if (r.H === 0) r.CH = 'No sales history';
+      if (r.frozen) r.CH = 'Frozen – no new orders';
+      else if (r.H === 0) r.CH = 'No sales history';
       else if (r.CE === 0) {
         r.CH = r.CF > st.maxCover + EPS ? 'Above MAX – overstock, no order'
           : (r.CF < r.AH - EPS ? (r.AL === 1 ? 'Below MIN – 1 MOQ would exceed MAX' : 'Below MIN – supplier not due (see Next PO)')
@@ -938,7 +947,7 @@ window.SAK_EN = {"،": ",", "و": "and", "لا": "No", "شهر": "mo", "شهر."
       r.CM = r.F + r.V - r.H;
       r.CN = r.F + r.in60 - r.H * 2;
       r.CO = r.F + r.X - r.H * 3;
-      if (r.H > 0 && r.CE === 0) {
+      if (r.H > 0 && r.CE === 0 && !r.frozen) {
         r.CP = D0 + Math.max(0, r.AE - r.R) * 30;
         var nq = r.H * (st.maxCover - r.R);
         r.CQ = Math.max(r.E, nq > 0 ? floorTo(round(nq, 6), r.E) : 0);
@@ -1129,14 +1138,15 @@ window.SAK_EN = {"،": ",", "و": "and", "لا": "No", "شهر": "mo", "شهر."
     'DO NOT ORDER': { i: 4, ar: 'لا تطلب', rule: 'التغطية بعد الوارد بين المستهدف وحد التعليق', act: 'لا طلب إلا لإكمال حاوية' },
     'HOLD (Mgmt Review)': { i: 5, ar: 'تعليق – مراجعة الإدارة', rule: 'التغطية بعد الوارد أعلى من حد التعليق', act: 'إيقاف الشراء ومراجعة الإدارة' },
     'REDUCE / SALES PUSH': { i: 6, ar: 'تخفيض / دفع المبيعات', rule: 'التغطية بعد الوارد أعلى من حد التخفيض', act: 'لا طلب، تقليل الوارد، تنشيط المبيعات' },
-    'NO SALES / REVIEW': { i: 7, ar: 'بدون مبيعات', rule: 'متوسط المبيعات = صفر', act: 'مراجعة يدوية / مخزون راكد' }
+    'NO SALES / REVIEW': { i: 7, ar: 'بدون مبيعات', rule: 'متوسط المبيعات = صفر', act: 'مراجعة يدوية / مخزون راكد' },
+    'FROZEN': { i: 8, ar: 'مجمّد', rule: 'جمّده المخطِّط: لا طلبات جديدة', act: 'لا يظهر في ماذا نشتري حتى إلغاء التجميد' }
   };
   var CHECK = {
     'OK': 'ضمن الحدود', 'OK – no order needed': 'ضمن الحدود – لا حاجة للطلب',
     'Above MAX – MOQ / rule forced': 'فوق الحد الأعلى – بسبب MOQ', 'Above MAX – container top-up': 'فوق الحد الأعلى – لإكمال الحاوية',
     'Above MAX – overstock, no order': 'فوق الحد الأعلى – مخزون زائد', 'Below MIN – MOQ step': 'تحت الحد الأدنى – خطوة MOQ',
     'Below MIN – 1 MOQ would exceed MAX': 'تحت الحد الأدنى – MOQ واحد يتجاوز الحد الأعلى',
-    'Below MIN – supplier not due (see Next PO)': 'تحت الحد الأدنى – المورد غير مستحق بعد', 'No sales history': 'لا توجد مبيعات',
+    'Below MIN – supplier not due (see Next PO)': 'تحت الحد الأدنى – المورد غير مستحق بعد', 'No sales history': 'لا توجد مبيعات', 'Frozen – no new orders': 'مجمّد – لا طلبات جديدة',
     'Code not in STOCK ALL – stock 0 used': 'الكود غير موجود في ملف المخزون – اعتُمد صفر',
     'No container capacity – supplier avg used': 'لا توجد سعة حاوية – استُخدم متوسط المورد',
     'No 40ft capacity – estimated 2 x 20ft': 'لا توجد سعة 40 قدم – قُدّرت بضعف 20 قدم',
@@ -1199,7 +1209,8 @@ window.SAK_EN = {"،": ",", "و": "and", "لا": "No", "شهر": "mo", "شهر."
     'DO NOT ORDER': ['Do not order', 'Cover after inbound is between target and hold threshold', 'No PO unless used as container filler'],
     'HOLD (Mgmt Review)': ['Hold – mgmt review', 'Cover after inbound is above the hold threshold', 'Hold purchase – management review'],
     'REDUCE / SALES PUSH': ['Reduce / sales push', 'Cover after inbound is above the reduce threshold', 'Do not order, reduce inbound, sales push'],
-    'NO SALES / REVIEW': ['No sales', 'Average sale = 0', 'Manual review / dead stock']
+    'NO SALES / REVIEW': ['No sales', 'Average sale = 0', 'Manual review / dead stock'],
+    'FROZEN': ['Frozen', 'Frozen by the planner: no new orders', 'Hidden from What to buy until unfrozen']
   };
   var ST_AR = null;
   function applyLang() {
@@ -2394,6 +2405,11 @@ window.SAK_EN = {"،": ",", "و": "and", "لا": "No", "شهر": "mo", "شهر."
         h += '</tbody></table></div></div>';
       }
     }
+    var fz = d.frozen === true || d.frozen === '1';
+    h += '<div class="card' + (fz ? ' frozen-card' : '') + '"><header><h2>' + L('الطلب', 'Ordering') + '</h2>' + (fz ? '<span class="pill st-8">' + L('مجمّد', 'Frozen') + (d.frozenAt ? ' · <span class="num">' + esc(d.frozenAt) + '</span>' : '') + '</span>' : '') + '</header><div class="body"><div class="grid">' +
+      '<label class="field"><span>' + L('حالة الطلب', 'Ordering status') + '</span><select id="k-frozen" data-k="frozen"' + ro + '><option value=""' + (fz ? '' : ' selected') + '>' + L('نشط: يدخل في الخطة', 'Active: included in the plan') + '</option><option value="1"' + (fz ? ' selected' : '') + '>' + L('مجمّد: لا طلبات جديدة', 'Frozen: no new orders') + '</option></select></label>' +
+      '<label class="field"><span>' + L('سبب التجميد', 'Reason for freezing') + '</span><input type="text" id="k-frozenNote" data-k="frozenNote" value="' + esc(d.frozenNote || '') + '"' + ro + '></label></div>' +
+      '<p class="muted small" style="margin:10px 0 0">' + L('الصنف المجمّد لا يظهر في «ماذا نشتري» ولا في التنبيهات، ولا يُضاف لإكمال الحاويات. يبقى مخزونه ووارده ظاهرين. احفظ الصنف بعد التغيير.', 'A frozen SKU is left out of What to buy and the alerts, and is never used to fill containers. Its stock and inbound stay visible. Save the SKU after changing this.') + '</p></div></div>';
     var sm = monthsBack(S.settings.date, 6), au = S.drawer.isNew ? null : autoAvg(d);
     d.sales = d.sales || {};
     h += '<div class="card"><header><h2>' + L('المبيعات الشهرية ومتوسطها', 'Monthly sales and average') + '</h2><span class="muted small">' + (au === null ? L('لا توجد مبيعات مسجّلة، يُستخدم المتوسط اليدوي', 'No sales on record, manual average in use') : L('المتوسط التلقائي: ', 'Automatic average: ') + '<b class="num">' + f1(au) + '</b>') + '</span></header><div class="body"><div class="grid">' +
@@ -2433,6 +2449,7 @@ window.SAK_EN = {"،": ",", "و": "and", "لا": "No", "شهر": "mo", "شهر."
     var o = { brand: String(d.brand || '').trim(), group: String(d.group || '').trim(), name: String(d.name || '').trim(), packing: String(d.packing || '').trim(), note: String(d.note || ''), ord: N(d.ord), stockMissing: !!d.stockMissing };
     NUMK.forEach(function (k) { o[k] = numOrNull(d[k]); });
     o.avgMode = d.avgMode === 'manual' ? 'manual' : 'auto';
+    o.frozen = d.frozen === true || d.frozen === '1'; o.frozenNote = o.frozen ? String(d.frozenNote || '').trim() : ''; o.frozenAt = o.frozen ? (d.frozenAt || todayIso()) : '';
     o.sales = {}; Object.keys(d.sales || {}).forEach(function (m) { var v = numOrNull(d.sales[m]); if (v !== null && /^\d{4}-\d\d$/.test(m)) o.sales[m] = v; });
     ['ruh', 'jed', 'dam'].forEach(function (k) { if (o[k] === null) o[k] = 0; });
     return o;
@@ -2520,7 +2537,8 @@ window.SAK_EN = {"،": ",", "و": "and", "لا": "No", "شهر": "mo", "شهر."
       if (!/^[A-Za-z0-9_.\-]+$/.test(code)) return toast('اكتب كود الصنف بأرقام أو حروف إنجليزية بدون مسافات.');
       if (S.drawer.isNew && S.skus.some(function (k) { return k.code === code; })) return toast('هذا الكود موجود مسبقاً.');
       var body = cleanSku(d);
-      write(function () { return S.db.doc('skus/' + code).set(body); }).then(function () { toast(L('تم حفظ الصنف ', 'SKU saved: ') + code); S.drawer = null; renderDrawer(); }).catch(fail);
+      var isNew = S.drawer.isNew;
+      write(function () { return isNew ? S.db.doc('skus/' + code).set(body) : S.db.doc('skus/' + code).update(body); }).then(function () { toast(L('تم حفظ الصنف ', 'SKU saved: ') + code); S.drawer = null; renderDrawer(); }).catch(fail);
     },
     'del-sku': function (el) {
       if (el.dataset.sure !== '1') { el.dataset.sure = '1'; el.textContent = 'تأكيد الحذف'; return; }
