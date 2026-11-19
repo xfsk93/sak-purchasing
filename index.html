@@ -2,7 +2,7 @@
 <html lang="ar" dir="rtl">
 <head>
 <meta charset="utf-8">
-<meta name="sak-build" content="20261116065023">
+<meta name="sak-build" content="20261119192947">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>SAK Purchasing</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -365,6 +365,11 @@ input[type="text"], input[type="number"], input[type="date"], input[type="month"
 .sg input.sgi.changed { outline: 2px solid var(--accent); outline-offset: -1px; }
 .sg th.inwin { color: var(--accent); }
 .sg td small.tag { display: block; margin-top: 3px; font-size: 10.5px; padding: 1px 6px; width: max-content; margin-inline-start: auto; }
+
+/* unit-cost history */
+tr.sub > td { background: var(--sunken); padding: 8px 12px 12px; }
+table.mini { width: 100%; font-size: 13px; }
+table.mini th { font-size: 11px; }
 
 </style>
 </head>
@@ -1255,8 +1260,8 @@ window.SAK_EN = {"،": ",", "و": "and", "لا": "No", "شهر": "mo", "شهر."
       ['Stock in cartons per branch from the latest stock file.', 'Correct any wrong number, then press Save changes.', 'Cover in red is under one month, in orange under two.']],
     payments: [['الرصيد = قيمة البضاعة ناقص الدفعات المسجّلة.', 'افتح الأمر على تبويب الدفعات لتسجيل دفعة.', 'الأوامر بدون أسعار لا يظهر لها رصيد.'],
       ['Balance = goods value minus recorded payments.', 'Open a PO on its Payments tab to record a payment.', 'POs without prices show no balance.']],
-    'unit-costs': [['آخر تكلفة واصلة لكل صنف ومتوسطها المرجّح.', 'تظهر الأصناف بعد إدخال أسعار أمر واحد على الأقل.', 'صدّر الجدول إلى Excel للتسعير.'],
-      ['Latest and weighted-average landed cost per SKU.', 'SKUs appear once at least one PO has prices.', 'Export the table to Excel for pricing.']],
+    'unit-costs': [['تكلفة المخزون الحالي تُحسب من الشحنات المستلمة فقط، الأحدث أولاً.', 'الشحنات التي لم تصل تظهر بتكلفة تقديرية في «الشحنة القادمة».', 'اضغط على الصنف لعرض تاريخ تكلفة كل الشحنات.'],
+      ['Current stock cost uses received shipments only, newest first.', 'Shipments not yet arrived show an estimated cost under Next shipment.', 'Click an item to see the cost history of every shipment.']],
     setup: [['تبويب البيانات: ارفع ملفي المخزون والمبيعات من دفترة.', 'تبويب القواعد: حدود التغطية وافتراضات التكلفة والموافقات.', 'كل شيء يُعاد حسابه فور الحفظ.'],
       ['Data tab: upload the Daftra stock and sales files.', 'Rules tab: cover limits, cost defaults and approvals.', 'Everything recalculates as soon as you save.']]
   };
@@ -1427,14 +1432,36 @@ window.SAK_EN = {"،": ",", "و": "and", "لا": "No", "شهر": "mo", "شهر."
     S.shipments.slice().sort(function (a, b) { return String(a.eta || '').localeCompare(String(b.eta || '')); }).forEach(function (sh) {
       var LC = E.computeLanded(sh, D.skuBy, S.settings.dutyPct);
       D.landed[sh.id] = LC;
+      var rec = stOf(sh) === 'received', inStock = rec && (sh.stocked || !sh.arrivedAt || sh.arrivedAt <= S.settings.date);
+      var src = {}; (sh.lines || []).forEach(function (x) { src[x.code] = x; });
       LC.lines.forEach(function (l) {
         if (!(l.price > 0) || !(l.qty > 0)) return;
-        var c = D.cost[l.code] = D.cost[l.code] || { n: 0, qty: 0, landed: 0, hist: [] };
-        c.n++; c.qty += l.qty; c.landed += l.landed;
-        c.last = { perCtn: l.perCtn, perPc: l.perPc, fob: l.fobCtn, uplift: l.uplift, no: sh.no, eta: sh.eta };
-        c.hist.push({ no: sh.no, eta: sh.eta, qty: l.qty, perCtn: l.perCtn, fob: l.fobCtn, status: sh.status });
-        c.avg = c.landed / c.qty;
+        var c = D.cost[l.code] = D.cost[l.code] || { hist: [] }, o = src[l.code] || {};
+        var q = rec && o.recv !== null && o.recv !== undefined && o.recv !== '' ? N(o.recv) - N(o.dmg) : l.qty;
+        c.hist.push({ id: sh.id, no: sh.no, eta: sh.eta, date: rec ? (sh.arrivedAt || sh.eta || '') : (sh.eta || ''), status: sh.status, rec: rec, inStock: inStock,
+          qty: q, perCtn: l.perCtn, perPc: l.perPc, fob: l.fobCtn, uplift: l.uplift });
       });
+    });
+    Object.keys(D.cost).forEach(function (code) {
+      var c = D.cost[code], k = D.skuBy[code], stock = k ? Math.max(0, N(k.stock)) : 0;
+      c.hist.sort(function (a, b) { return String(a.date || '9999').localeCompare(String(b.date || '9999')); });
+      var recv = c.hist.filter(function (x) { return x.rec; }), est = c.hist.filter(function (x) { return !x.rec; });
+      c.n = c.hist.length; c.nRec = recv.length;
+      c.lastRec = recv.length ? recv[recv.length - 1] : null;
+      c.next = est.length ? est[0] : null;
+      var rq = 0, rv = 0; recv.forEach(function (x) { rq += x.qty; rv += x.qty * x.perCtn; });
+      c.avgRec = rq > 0 ? rv / rq : null;
+      // FIFO: current stock is made of the most recent received shipments that are already in the stock file
+      var layers = recv.filter(function (x) { return x.inStock; }), left = stock, val = 0;
+      for (var i = layers.length - 1; i >= 0 && left > 0; i--) { var take = Math.min(left, layers[i].qty); val += take * layers[i].perCtn; left -= take; }
+      c.covered = stock - left;
+      if (layers.length && left > 0) val += left * layers[0].perCtn;   // older stock than any priced shipment: oldest known cost
+      c.stockCtn = stock;
+      c.stockCost = layers.length && stock > 0 ? val / stock : (c.lastRec ? c.lastRec.perCtn : null);
+      c.stockVal = c.stockCost !== null ? stock * c.stockCost : null;
+      c.estOnly = !recv.length;
+      c.last = c.lastRec || c.next;            // used by plan table / SKU drawer / exports
+      c.avg = c.stockCost;
     });
   }
 
@@ -1587,7 +1614,7 @@ window.SAK_EN = {"،": ",", "و": "and", "لا": "No", "شهر": "mo", "شهر."
     var open = S.shipments.filter(function (s) { return onOrder(s); });
     var openCtn = open.reduce(function (a, s) { return a + (s.lines || []).reduce(function (b, l) { return b + N(l.qty); }, 0); }, 0);
     var valued = 0, value = 0;
-    p.rows.forEach(function (r) { var c = D.cost[r.code]; if (c) { valued++; value += r.F * c.avg; } });
+    p.rows.forEach(function (r) { var c = D.cost[r.code]; if (c && c.stockVal !== null) { valued++; value += c.stockVal; } });
     var h = '<div class="head"><div><h1>' + L('اليوم', 'Today') + '</h1><p>الوضع بتاريخ <span class="num">' + esc(S.settings.date) + '</span> · إعادة الطلب عند مدة التوريد + <span class="num">' + S.settings.safety + '</span> شهر · التغطية بعد الطلب <span class="num">' + S.settings.minCover + '–' + S.settings.maxCover + '</span> شهر</p></div></div>';
     h += stockBar();
     h += pipeline();
@@ -2175,12 +2202,40 @@ window.SAK_EN = {"،": ",", "و": "and", "لا": "No", "شهر": "mo", "شهر."
 
   VIEW['unit-costs'] = function () {
     var rows = D.plan.rows.filter(function (r) { return D.cost[r.code]; });
-    var h = '<div class="head"><div><h1>تكلفة الأصناف</h1><p>التكلفة الواصلة لكل صنف من الشحنات التي أُدخلت أسعارها: آخر شحنة والمتوسط المرجّح بالكمية.</p></div><div class="actions">' + (S.dl && rows.length ? '<button class="btn" data-act="export-costs">تصدير Excel</button>' : '') + '</div></div>';
+    var h = '<div class="head"><div><h1>تكلفة الأصناف</h1><p>' + L('تكلفة المخزون الحالي من الشحنات المستلمة (الأحدث أولاً)، والتكلفة التقديرية للشحنات التي لم تصل. اضغط على الصنف لعرض تاريخ كل الشحنات.', 'Current stock cost from received shipments (newest first), and estimated cost for shipments not yet arrived. Click an item to see the history of every shipment.') + '</p></div><div class="actions">' + (S.dl && rows.length ? '<button class="btn" data-act="export-costs">تصدير Excel</button>' : '') + '</div></div>';
     if (!rows.length) return h + '<div class="card"><div class="empty"><h2>لا توجد تكاليف محسوبة بعد</h2><p>افتح شحنة من «الشحنات والتكلفة» وأدخل سعر الشراء والمصاريف، وستظهر تكلفة كل صنف هنا.</p></div></div>';
-    h += '<div class="card"><div class="scroll"><table><thead><tr><th>الكود</th><th>الصنف</th><th>المورد</th><th class="n">شحنات</th><th>آخر شحنة</th><th class="n">سعر الشراء/كرتون ر.س</th><th class="n">التكلفة الواصلة/كرتون</th><th class="n">للحبة</th><th class="n">التحميل</th><th class="n">المتوسط المرجّح/كرتون</th><th class="n">المخزون CTN</th><th class="n">قيمة المخزون ر.س</th></tr></thead><tbody>' +
+    var tv = 0, tn = 0, miss = 0;
+    rows.forEach(function (r) { var c = D.cost[r.code]; if (c.stockVal !== null) { tv += c.stockVal; tn++; } else if (r.F > 0) miss++; });
+    h += '<div class="tiles">' +
+      '<div class="tile acc"><div class="k">' + L('قيمة المخزون الحالي بالتكلفة', 'Current stock value at cost') + '</div><div class="v num">' + f0(tv) + '</div><div class="s">' + L('ر.س · ', 'SAR · ') + tn + L(' صنف له تكلفة مستلمة', ' SKUs with a received cost') + '</div></div>' +
+      '<div class="tile"><div class="k">' + L('أصناف بمخزون بلا تكلفة مستلمة', 'SKUs in stock without a received cost') + '</div><div class="v num">' + miss + '</div><div class="s">' + L('تظهر تكلفتها التقديرية فقط', 'only an estimated cost is shown') + '</div></div></div>';
+    S.costOpen = S.costOpen || {};
+    h += '<div class="card"><div class="scroll"><table><thead><tr><th>الكود</th><th>الصنف</th><th>المورد</th>' +
+      '<th>' + L('آخر شحنة مستلمة', 'Last received') + '</th><th class="n">' + L('التكلفة الواصلة/كرتون', 'Landed / CTN') + '</th>' +
+      '<th class="n">المخزون CTN</th><th class="n">' + L('تكلفة المخزون/كرتون', 'Stock cost / CTN') + '</th><th class="n">قيمة المخزون ر.س</th>' +
+      '<th>' + L('الشحنة القادمة', 'Next shipment') + '</th><th class="n">' + L('تقديري/كرتون', 'Est. / CTN') + '</th><th class="n">' + L('التغيّر', 'Change') + '</th><th class="n">' + L('شحنات', 'Shipments') + '</th></tr></thead><tbody>' +
       rows.map(function (r) {
-        var c = D.cost[r.code];
-        return '<tr class="click" data-act="open-sku" data-v="' + esc(r.code) + '"><td class="num">' + esc(r.code) + '</td><td><div class="item-name">' + esc(r.sku.name) + '</div></td><td>' + esc(r.sup) + '</td><td class="n">' + c.n + '</td><td class="num">' + esc(c.last.no || c.last.eta || '') + '</td><td class="n">' + f2(c.last.fob) + '</td><td class="n"><b>' + f2(c.last.perCtn) + '</b></td><td class="n">' + f2(c.last.perPc) + '</td><td class="n">+' + pct(c.last.uplift, 1) + '</td><td class="n">' + f2(c.avg) + '</td><td class="n">' + f0(r.F) + '</td><td class="n">' + f0(r.F * c.avg) + '</td></tr>';
+        var c = D.cost[r.code], lr = c.lastRec, nx = c.next, open = S.costOpen[r.code];
+        var base = c.stockCost !== null ? c.stockCost : null, chg = nx && base ? nx.perCtn / base - 1 : null;
+        var part = c.stockCost !== null && c.stockCtn > 0 && c.covered < c.stockCtn - 0.5;
+        var t = '<tr class="click" data-act="cost-hist" data-v="' + esc(r.code) + '"><td class="num">' + (open ? '▾ ' : '▸ ') + esc(r.code) + '</td><td><div class="item-name">' + esc(r.sku.name) + '</div></td><td>' + esc(r.sup) + '</td>' +
+          '<td class="num">' + (lr ? esc(lr.no || '—') + ' · ' + esc(lr.date || '') : '<span class="tag warn">' + L('لم تصل شحنة مسعّرة', 'none priced yet') + '</span>') + '</td>' +
+          '<td class="n">' + (lr ? '<b>' + f2(lr.perCtn) + '</b>' : '—') + '</td>' +
+          '<td class="n">' + f0(c.stockCtn) + '</td>' +
+          '<td class="n">' + (c.stockCost !== null ? '<b>' + f2(c.stockCost) + '</b>' + (part ? ' <span class="tag warn" title="' + esc(L('جزء من المخزون أقدم من الشحنات المسعّرة، قُيّم بأقدم تكلفة معروفة', 'Part of the stock is older than the priced shipments; valued at the oldest known cost')) + '">*</span>' : '') : '—') + '</td>' +
+          '<td class="n">' + (c.stockVal !== null ? f0(c.stockVal) : '—') + '</td>' +
+          '<td class="num">' + (nx ? esc(nx.no || '—') + ' · ' + esc(nx.eta || '—') : '—') + '</td>' +
+          '<td class="n">' + (nx ? f2(nx.perCtn) + ' <span class="tag">' + L('تقديري', 'est.') + '</span>' : '—') + '</td>' +
+          '<td class="n">' + (chg === null ? '—' : (chg > 0 ? '+' : '') + pct(chg, 1)) + '</td>' +
+          '<td class="n">' + c.n + '</td></tr>';
+        if (open) {
+          t += '<tr class="sub"><td></td><td colspan="11"><table class="mini"><thead><tr><th>' + L('الشحنة', 'Shipment') + '</th><th>' + L('الحالة', 'Status') + '</th><th>' + L('التاريخ', 'Date') + '</th><th class="n">' + L('الكمية', 'Qty') + '</th><th class="n">' + L('سعر الشراء/كرتون ر.س', 'Purchase / CTN SAR') + '</th><th class="n">' + L('التكلفة الواصلة/كرتون', 'Landed / CTN') + '</th><th class="n">' + L('للحبة', 'Per piece') + '</th><th class="n">' + L('التحميل', 'Uplift') + '</th><th>' + L('النوع', 'Type') + '</th></tr></thead><tbody>' +
+            c.hist.slice().reverse().map(function (x) {
+              return '<tr class="click" data-act="edit-ship" data-v="' + esc(x.id) + '"><td class="num">' + esc(x.no || '—') + '</td><td>' + SHIP_ST[stOf(x)] + '</td><td class="num">' + esc(x.date || '—') + '</td><td class="n">' + f0(x.qty) + '</td><td class="n">' + f2(x.fob) + '</td><td class="n"><b>' + f2(x.perCtn) + '</b></td><td class="n">' + f2(x.perPc) + '</td><td class="n">+' + pct(x.uplift, 1) + '</td><td>' +
+                (x.rec ? '<span class="tag good">' + L('فعلي · مستلمة', 'actual · received') + '</span>' + (x.inStock ? '' : ' <span class="tag">' + L('بعد تاريخ المخزون', 'after stock date') + '</span>') : '<span class="tag">' + L('تقديري · لم تصل', 'estimated · not arrived') + '</span>') + '</td></tr>';
+            }).join('') + '</tbody></table></td></tr>';
+        }
+        return t;
       }).join('') + '</tbody></table></div></div>';
     return h;
   };
@@ -2333,7 +2388,8 @@ window.SAK_EN = {"،": ",", "و": "and", "لا": "No", "شهر": "mo", "شهر."
       if (inb.length || c) {
         h += '<div class="card"><header><h2>الشحنات والتكلفة</h2></header><div class="scroll"><table><thead><tr><th>الشحنة</th><th>الوصول</th><th>الحالة</th><th class="n">الكمية</th><th class="n">سعر الشراء ر.س</th><th class="n">التكلفة الواصلة/كرتون</th></tr></thead><tbody>';
         var seen = {};
-        (c ? c.hist : []).forEach(function (x) { seen[x.no + '|' + x.eta] = 1; h += '<tr><td class="num">' + esc(x.no || '—') + '</td><td class="num">' + esc(x.eta || '—') + '</td><td>' + SHIP_ST[stOf(x)] + '</td><td class="n">' + f0(x.qty) + '</td><td class="n">' + f2(x.fob) + '</td><td class="n"><b>' + f2(x.perCtn) + '</b></td></tr>'; });
+        (c ? c.hist : []).forEach(function (x) { seen[x.no + '|' + x.eta] = 1; h += '<tr><td class="num">' + esc(x.no || '—') + '</td><td class="num">' + esc(x.date || x.eta || '—') + '</td><td>' + SHIP_ST[stOf(x)] + '</td><td class="n">' + f0(x.qty) + '</td><td class="n">' + f2(x.fob) + '</td><td class="n"><b>' + f2(x.perCtn) + '</b> <span class="tag' + (x.rec ? ' ok' : '') + '">' + (x.rec ? L('فعلي', 'actual') : L('تقديري', 'est.')) + '</span></td></tr>'; });
+        if (c && c.stockCost !== null) h += '<tr><td colspan="5"><b>' + L('تكلفة المخزون الحالي/كرتون', 'Current stock cost / CTN') + '</b></td><td class="n"><b>' + f2(c.stockCost) + '</b></td></tr>';
         inb.forEach(function (x) { if (seen[x.no + '|' + x.eta]) return; h += '<tr><td class="num">' + esc(x.no || '—') + '</td><td class="num">' + esc(x.eta || '—') + '</td><td>' + SHIP_ST[stOf(x)] + '</td><td class="n">' + f0(x.qty) + '</td><td class="n">—</td><td class="n">—</td></tr>'; });
         h += '</tbody></table></div></div>';
       }
@@ -2596,6 +2652,7 @@ window.SAK_EN = {"،": ",", "و": "and", "لا": "No", "شهر": "mo", "شهر."
     'apply-import': function () { applyImport(); },
     'export-items': function () { exportXlsx('الأصناف', 'SAK-items', exportItems()); },
     'export-po': function () { exportXlsx('PO', 'SAK-PO-list', exportPO()); },
+    'cost-hist': function (el) { S.costOpen = S.costOpen || {}; S.costOpen[el.dataset.v] = !S.costOpen[el.dataset.v]; render(); },
     'export-costs': function () { exportXlsx('Landed', 'SAK-landed-cost', exportCosts()); },
     'export-ship': function () { exportXlsx('Shipment', 'SAK-shipment-' + (S.editor.no || 'draft'), exportShip()); }
   };
@@ -2827,8 +2884,14 @@ window.SAK_EN = {"،": ",", "و": "and", "لا": "No", "شهر": "mo", "شهر."
     return a;
   }
   function exportCosts() {
-    var a = [['Code', 'Item', 'Supplier', 'Shipments', 'Last shipment', 'Purchase / CTN (SAR)', 'Landed / CTN (SAR)', 'Landed / piece (SAR)', 'Uplift', 'Weighted avg landed / CTN', 'Stock CTN', 'Stock value (SAR)']];
-    D.plan.rows.forEach(function (r) { var c = D.cost[r.code]; if (c) a.push([r.code, r.sku.name, r.sup, c.n, c.last.no || c.last.eta, c.last.fob, c.last.perCtn, c.last.perPc, c.last.uplift, c.avg, r.F, r.F * c.avg]); });
+    var a = [['Code', 'Item', 'Supplier', 'Shipment', 'Status', 'Type', 'Date', 'Qty CTN', 'Purchase / CTN (SAR)', 'Landed / CTN (SAR)', 'Landed / piece (SAR)', 'Uplift', 'Stock CTN', 'Stock cost / CTN (SAR)', 'Stock value (SAR)']];
+    D.plan.rows.forEach(function (r) {
+      var c = D.cost[r.code]; if (!c) return;
+      c.hist.forEach(function (x, i) {
+        a.push([r.code, r.sku.name, r.sup, x.no || '', stOf(x), x.rec ? 'actual' : 'estimated', x.date || '', x.qty, x.fob, x.perCtn, x.perPc, x.uplift,
+          i === 0 ? c.stockCtn : '', i === 0 && c.stockCost !== null ? c.stockCost : '', i === 0 && c.stockVal !== null ? c.stockVal : '']);
+      });
+    });
     return a;
   }
   function exportShip() {
